@@ -4,6 +4,14 @@ Each entry has a status: `open` (under discussion), `adopted` (agreed, and refle
 
 The entries so far came out of two reviews on 2026-11-11, the plan checked against mjlab's code and the LLA-MPPI paper (see [related-work.md](related-work.md)), and the discussions that followed. Entries 3.2, 3.4, 3.5, 3.9 and 3.10 were adopted that day, when the two MPPI demos were built (see [progress.md](progress.md)). Everything else is still open.
 
+## System overview
+
+![System overview: an MPPI planner sends velocity commands to an RL tracking policy, which drives a simulated Go1. Both layers adapt online.](system.svg)
+
+*The system has two layers, and each adapts online in its own way. The planner re-fits a residual in its motion model from how the robot actually moved (entry 3.11). The policy adapts its gait through its observation history (entry 5.6). Solid boxes exist today, dashed boxes are planned, and orange marks the parts that adapt. Drawn on 2026-11-12.*
+
+When a planned part is built, move its box from the dashed group to the solid group in `system.svg`.
+
 ## 1. What makes the project interesting
 
 ### 1.1 Frame it as adaptation at two levels, with no predefined damage models
@@ -199,6 +207,42 @@ The plan lists "add speed-dependent terms" as the fallback if the planar model i
 
 Even with the terms the model is still optimistic at the limit. Terms that depend on the current velocity, not only the command, are a possible next step.
 
+### 3.11 How the planner would adapt online
+
+**Status:** `open` · 2026-11-12
+
+Not built yet. Today the planar model is fitted once, offline, and stays fixed during a run.
+
+The MPPI algorithm itself would not change. Only the model it plans with would: its parameters would be re-fitted during the run from the robot's own recent motion. Each plan step already produces one sample for that fit, namely the velocity over the last step, the command that was sent, and the velocity that resulted. The steps would be:
+
+1. Keep the samples from the last second or so.
+2. Re-solve the least-squares fit on them, every plan step. It is a tiny problem.
+3. Hand the new parameters to MPPI's rollouts for the next plan.
+
+Proposed form, raised on 2026-11-12: a residual model. The offline model stays fixed as the nominal model, and only a small correction on top of it is re-fitted online:
+
+  v_next = nominal(v, u) + residual(v, u)
+
+- **What is fitted:** the nominal model's recent prediction errors, so the target is "what the robot did minus what the nominal model said". With no damage the errors are near zero and so is the residual.
+- **Size of the residual:** start with a gain and an offset per axis (6 numbers), as in the plan. A fuller linear residual in the velocity and command is the next step up.
+- **How it is fitted:** least squares that forgets old samples gradually and is pulled toward zero. The pull toward zero means the residual only moves when the data shows something, which also covers the cases of too little data and constant commands below.
+- **What it gives for free:** the size of the residual is a damage signal. It can be plotted around the chop (entry 2.4).
+- **Its limit:** the residual is fitted on what the robot is doing now, so it is only reliable near the current commands. MPPI could plan toward commands where it is wrong. Keeping the residual small in parameter count limits this.
+
+This is close in shape to DATT in the plan's references, which pairs an RL policy with an online adaptive estimator. A residual only on the planar motion should be enough here, because the policy absorbs the change in how the legs must move. LLA-MPPI's disturbance-observer baseline failed on leg lock (0 of 50), but there the residual had to explain whole-body dynamics with no adapting policy underneath.
+
+Three problems to design around, none tested yet:
+
+- **Too little data.** One second is 10 samples, and the full model has 16 parameters per velocity component. Fit only a few parameters online, such as a gain and an offset per axis on top of the offline model, which is what the plan says. Alternatively, pull the fit toward the offline model so that the data only changes what it actually shows.
+- **Constant commands** (entry 3.1). With no variation in the command, a gain and an offset cannot be told apart. Pulling toward the offline model handles this too: what the data does not show stays at its old value.
+- **Speed against noise.** The gait makes the measured velocity oscillate, so a very short window fits noise. A window of about a second, or a fit that forgets old samples gradually, is the trade-off.
+
+What it should look like at a chop: the model's predictions suddenly miss, and within about a second the fitted gain drops and an offset appears, for example a steady drift to one side. MPPI's predicted paths then bend the way the damaged robot really moves, so it steers against the drift and slows for turns.
+
+The command limits are a separate problem (entry 3.9). A lower gain tells MPPI the robot is slower, but not that a command has become unsafe.
+
+Entry 3.6 describes how to test this before the chop event exists.
+
 ## 4. Damage injection
 
 Background: MuJoCo Warp calls each parallel environment a "world". Some model fields can differ per world, including geom size and position, site position and PD gains. The collision settings `contype`, `conaffinity` and `condim` cannot.
@@ -280,6 +324,57 @@ The box-push demo copies simulation state into planning worlds (entry 3.5). That
 **Status:** `open` · 2026-11-11
 
 The baseline run stopped at the curriculum stage with forward commands up to 2.0 m/s and yaw up to 0.7 rad/s. The next stage, up to 3.0 m/s, starts exactly where the run ended, so it was never trained. The policy already extrapolates to about 2.8 m/s and 1.9 rad/s, but it falls beyond that. Training longer, or with wider ranges for forward speed and yaw, is the remaining way to make the race faster. One training run takes a little over an hour.
+
+### 5.6 What turns the PPO policy into meta-RL
+
+**Status:** `open` · 2026-11-12
+
+History alone is not enough. A policy with history trained only on the undamaged robot has nothing to adapt to and learns to ignore the history. Black-box meta-RL needs three things together:
+
+- **Memory:** the actor sees its recent observations and actions, as a stacked window or through a recurrent network.
+- **A distribution of tasks in training:** many damages, starting at random times mid-episode, with some episodes undamaged. The switch has to happen during an episode, or the policy never learns to notice it.
+- **A hidden task:** the actor is never told the damage. It has to infer it from how the robot responds to its own actions. The critic may be told (entry 5.3).
+
+Training is still ordinary PPO. The adaptation happens inside the forward pass, with no weight updates at test time. This is the same idea as in-context learning in language models: the history is the context, and the damage is the task inferred from it. With a transformer over a long history it is in-context learning in the literal sense, which is how LocoFormer is usually described.
+
+Options for the memory, from least to most work:
+
+| Option | What it is | Work in mjlab |
+|---|---|---|
+| Stacked history | The actor's MLP sees the last N observations | One setting, `history_length` |
+| Recurrent policy | GRU or LSTM actor, the classic form of black-box meta-RL | A config change, already supported by rsl-rl |
+| Teacher and student (RMA) | A teacher sees the true damage as a latent; a student learns to predict that latent from history | Two training phases and an extra network |
+| Transformer over a long context | In-context learning in the literal sense | A new policy class and much more compute |
+
+Suggested starting point, not yet tested: stacked history of 0.5 to 1 s, which is one to two gait cycles, with the true damage given to the critic. Use the recurrent policy as an ablation.
+
+Black-box meta-RL is one family of meta-RL, not the whole field. All families train across a distribution of tasks and differ in where the adaptation to a new task happens:
+
+| Family | Where adaptation happens | Example |
+|---|---|---|
+| Black-box, memory-based | In the policy's memory, with no weight updates | RL², LocoFormer |
+| Gradient-based | In the weights, by a few gradient steps at test time | MAML |
+| Task inference | In an explicit latent task variable inferred from recent data | PEARL, VariBAD; RMA is a supervised relative |
+| Model-based | In a dynamics model that is updated online, then used for planning | Nagabandi et al. |
+
+Black-box fits the policy because the robot has to adapt within seconds, mid-run, with no time for trial episodes or gradient steps. Our planner is a small hand-designed case of the model-based family: its least-squares re-fit is the adaptation, and MPPI is the planning.
+
+Why history helps, in POMDP terms (raised 2026-11-12). The damage can be treated as a hidden part of the state: which leg, how much is cut, whether the motor is dead, and whether the chop has happened yet. With that variable included, the problem is an ordinary Markov problem again, but the policy cannot observe it. That makes it a POMDP, and in a POMDP the best action depends on the belief about the hidden state, which is computed from the history of observations and actions. A policy that sees only the current observation cannot hold a belief, so it can only be robust on average.
+
+- **Why one observation is not enough:** the same joint angles and velocities occur with and without damage. The damage shows in how the robot responds to an action over the following steps.
+- **What the memory does:** it plays the role of the belief. A stacked window is a truncated version of it, which is enough if one or two gait cycles identify the damage.
+- **The baseline is already a POMDP.** Friction, the centre-of-mass offset and the encoder bias are randomized and hidden from the actor, and it does not see contacts or its height. Without history it is robust to them, not adapted to them.
+- **The privileged critic** is the critic being given the hidden state, which is allowed because the critic is only used in training.
+- **The planner does the same inference explicitly.** Its residual fit is a point estimate of how the hidden damage changes the planar motion. Pulling the fit toward zero acts as a prior, and forgetting old samples allows the hidden state to change.
+
+Names for this setting that are worth citing, to be checked against the papers: hidden-parameter MDP (Doshi-Velez and Konidaris), hidden-mode MDP for a hidden state that switches (Choi, Yeung and Zhang), and Bayes-adaptive MDP for the meta-RL view (Duff).
+
+Ways to check that the policy really adapts and is not just robust:
+
+- **Against the no-history policy** trained on the same damages (rows 1 and 2 of the experiments table). The gap is the value of adaptation.
+- **Recovery curve:** tracking error against time since the chop should fall over a second or two, not jump to a new steady level.
+- **History ablation at test time:** blank or shuffle the history. Performance after damage should drop.
+- **Probe:** the damage should be decodable from the policy's hidden features.
 
 ## 6. Demo and setup
 

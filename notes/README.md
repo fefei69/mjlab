@@ -7,7 +7,8 @@ A shared notebook for the RL & OC project: a simulated Unitree Go1 that keeps wa
 | File | What it holds | Update it when |
 |---|---|---|
 | [plan.md](plan.md) | The project plan, as a snapshot from 2026-11-11 | An idea is adopted and changes the plan |
-| [ideas.md](ideas.md) | Ideas and open questions, each with a status | Something new comes up, or an idea is settled |
+| [ideas.md](ideas.md) | Ideas and open questions, each with a status, and the system figure | Something new comes up, or an idea is settled |
+| [system.svg](system.svg) | The system figure shown in ideas.md: what is built and what is planned | A planned part is built |
 | [progress.md](progress.md) | Milestone status, setup, and a dated log of work and results | After each work session |
 | [related-work.md](related-work.md) | Papers we've read: what they do and how we differ | We read a paper |
 
