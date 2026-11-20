@@ -104,6 +104,7 @@ Difficulty is Easy, Medium or Hard. Size is S (a day or two), M (three to five d
 | S1 | Measure which changes matter | Easy to Medium | M | Python, PyTorch tensors, reading simulator code | Yes | Nothing | |
 | S2 | Build the mid-run change for training | Medium | M | mjlab's event system, MuJoCo basics | Yes | Nothing for motor faults | |
 | S3 | Build the calf cut (stretch) | Hard | L | MuJoCo geometry and contact, reward design | Yes | S2 | |
+| S4 | Define the randomization | Medium | S to M | Judgment about training ranges, some RL background | Little | S1 for the numbers | |
 | T1 | Path task with turns in both directions | Easy to Medium | M | Python, plane geometry, cost design | Yes | Nothing | |
 | P1 | Train the policy without history on the changes | Medium | M | Running PPO training, reading training curves | Yes | S2 | |
 | P2 | Train the policy with history | Medium to Hard | M to L | PPO training, observation and network setup | Yes | S2 | |
@@ -132,7 +133,7 @@ Difficulty is Easy, Medium or Hard. Size is S (a day or two), M (three to five d
 The items are grouped into five roles in [roles.md](roles.md):
 
 - **Method, residual dynamics model (cpw):** R1, R2, and R3 if time allows.
-- **Robot changes:** S1, S2, with S3 as a stretch.
+- **Robot changes:** S1, S2, S4, with S3 as a stretch.
 - **Policy:** P1, P2, P3, with P4 as an option.
 - **Evaluation:** T1, X1, X2, with W2 and R4 as options.
 - **Story and demos:** V1, V2, X3, W1, W3, W4.
@@ -171,6 +172,16 @@ The original demo: one lower leg is cut short mid-run.
 - **Do:** shrink and move the lower-leg and foot collision shapes, give the stump friction, move or mask the foot's sensors and reward terms, and show the cut in the video.
 - **Done when:** the robot can be cut mid-run in simulation without the physics or the rewards breaking.
 - **Why it's hard:** five separate things need care. They are listed in [ideas.md](ideas.md) entries 4.1 to 4.5.
+
+### S4. Define the randomization
+
+What the policies are trained on and tested on, written down once so that everyone uses the same thing. If the two policies train on different mixes of changes, or the evaluation uses a different split, the final comparison is not fair.
+
+- **Changes in training:** which legs, joints and severities are drawn and how often, how many episodes have no change at all, and when in the episode the change happens. Consider starting with mild changes and widening them as training goes on.
+- **Held-out set:** which combinations are never seen in training. Fix it before the first real training run.
+- **Ordinary randomization:** the Go1 task already randomizes foot friction, joint-encoder offsets and the trunk's centre of mass, and pushes the robot at random times. The current policy was trained with these on. Decide whether they stay on in training, and whether the evaluation runs with them on. The demos switch them off, so that the planner's simulated copies match the robot exactly.
+- **Done when:** one place in the code defines the training set and the held-out set, and both the training (P1, P2) and the evaluation script (X1) read it.
+- **Who it is for:** Policy and Evaluation both depend on it, so agree it with them.
 
 ### T1. Path task with turns in both directions
 

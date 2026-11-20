@@ -26,10 +26,10 @@ The planner predicts the robot's motion with a small model fitted before the run
 
 You build the thing the whole project reacts to: a change to the robot in the middle of a run, such as a motor dying on one leg.
 
-- **You deliver:** a mid-run change that can be switched on in training and in the demos, and a measurement of which kinds of change matter.
+- **You deliver:** a mid-run change that can be switched on in training and in the demos, a measurement of which kinds of change matter, and the randomization: which changes the policies train on and which are held out for testing.
 - **First week:** S1. Apply candidate changes to the policy we already have and measure what each does. This settles an open decision for the whole team.
-- **Items:** S1, S2, and S3 as a stretch goal.
-- **Others wait for you:** Policy cannot start its real training runs until S2 works.
+- **Items:** S1, S2, S4, and S3 as a stretch goal.
+- **Others wait for you:** Policy cannot start its real training runs until S2 works and S4 is agreed.
 
 ## Policy
 
@@ -38,7 +38,7 @@ You train the walking policy twice on the same changes: once seeing only the cur
 - **You deliver:** the two trained policies, and evidence that the one with history really adapts.
 - **First week:** get the existing training running on the GPU machine, and train a policy with history on the undamaged robot as a dry run.
 - **Items:** P1, P2, P3, and P4 as an option.
-- **You wait for:** S2 from Robot changes, for the real runs.
+- **You wait for:** S2 and S4 from Robot changes, for the real runs. Agree the training ranges in S4 with them.
 
 ## Evaluation
 
@@ -47,7 +47,7 @@ You make the results trustworthy: one course, one set of measurements, and the s
 - **You deliver:** a course with turns in both directions, a script that measures any controller on it, and the final four-way comparison.
 - **First week:** T1 and the start of X1, both on the policy and planner that already exist.
 - **Items:** T1, X1, X2, and W2 and R4 as options.
-- **You wait for:** everyone, for the final comparison. Nothing, to start.
+- **You wait for:** everyone, for the final comparison. Nothing, to start. The held-out set you test on comes from S4.
 
 ## Story and demos
 

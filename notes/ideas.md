@@ -257,6 +257,28 @@ The command limits are a separate problem (entry 3.9). A lower gain tells MPPI t
 
 Entry 3.6 describes how to test this before the chop event exists.
 
+Development plan, agreed with cpw on 2026-11-20. cpw owns this part and develops it on a small set of changes of their own, without waiting for the final set.
+
+Choose the changes by their effect on planar motion, so that each thing the residual must do is exercised:
+
+| Effect on planar motion | Example change | What the residual should do |
+|---|---|---|
+| The robot delivers less of what is commanded | All motors weaker, or a backward drag on the trunk | Lower its gain |
+| The robot drifts steadily | One leg's motor weak, or a sideways pull on the trunk | Grow an offset |
+| Nothing visible in planar motion | A small friction change at low speed | Stay near zero |
+
+The third row checks that the residual does not react to noise. Undoing a change mid-run checks that it adapts back.
+
+Order of work:
+
+1. **Made-up data.** Change a gain or an offset of the nominal model by a known amount, add noise, and check that the fit recovers it and how fast. Only here is the true answer known.
+2. **A steady force on the trunk** in the simulator. mjlab can apply an external force to a body, so this needs no new environment code. Not tried in our setup yet.
+3. **Motor faults,** once item S2 in [tasks.md](tasks.md) provides them, so there is one implementation of the changes and not two.
+
+Keep the development set apart from the test set. A few numbers get tuned on these changes: how fast the fit forgets, how strongly it is pulled toward zero, and which parameters it fits. Tuning them on the changes used in the final comparison would give this controller an unfair advantage over the other three, so the held-out set from item S4 stays unseen during development.
+
+The residual is fitted during the run and not trained, so this is a development set of changes, not domain randomization in the training sense.
+
 ## 4. Damage injection
 
 Background: MuJoCo Warp calls each parallel environment a "world". Some model fields can differ per world, including geom size and position, site position and PD gains. The collision settings `contype`, `conaffinity` and `condim` cannot.
