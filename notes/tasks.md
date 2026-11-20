@@ -32,7 +32,7 @@ Results and the commands to reproduce them are in [progress.md](progress.md). Th
 ### Before you start
 
 - **Code:** clone the fork, check out `dev`, run `uv sync`. Always run things with `uv run`.
-- **Trained policy:** the checkpoint is not in git, because training outputs are ignored. Ask cpw for it, or retrain it yourself in about 75 minutes with the command in [progress.md](progress.md).
+- **Trained policy:** the baseline checkpoint and its fitted planar model are in the repository, in `mppi/checkpoints/go1_flat_baseline/`. The demos use them by default, so there is nothing to download. Your own training outputs go under `logs/`, which git ignores.
 - **GPU:** everything so far ran on one PC with an RTX 5080. Training needs a GPU like that. Ask cpw how to share that machine. The table below says which items need it.
 - **Try it:** `uv run python -m mppi.demo_circle_race` runs the race and writes a video. If that works, your setup is fine.
 

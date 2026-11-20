@@ -19,6 +19,7 @@ Still to set: the deadline and checkpoint dates.
 - **Version:** commit `936f7a1`, which is mjlab v1.6.0 plus 60 commits, with MuJoCo and MuJoCo Warp 3.16.
 - **Training budget:** 10,000 PPO iterations with 4096 environments take 1 h 14 min, so several runs fit in a day.
 - **Results:** everything under `logs/` is ignored by git and exists only on the training PC.
+- **Shared baseline:** the final baseline checkpoint and its fitted planar model are also in the repository, in `mppi/checkpoints/go1_flat_baseline/`, and the demos load them from there by default.
 
 ## Log
 
@@ -26,6 +27,7 @@ Still to set: the deadline and checkpoint dates.
 
 - Wrote [roles.md](roles.md): five roles, one per person. cpw takes the method role, which is the design of the planner's residual dynamics model. The other four are open.
 - No work on the items since 2026-11-12. The task list had not been pushed.
+- Put the baseline checkpoint (4.6 MB) and its planar model into the repository, in `mppi/checkpoints/go1_flat_baseline/`, so teammates can run the demos straight after a clone.
 - Added item S4, the randomization the policies train on and the held-out set, to the Robot changes role.
 - cpw's role now covers a residual model at two levels. The planner's residual comes first. A joint-level residual given to the walking policy as an input comes second, as an exploration ([ideas.md](ideas.md), entries 3.11 and 5.7). Whether this changes the four-way comparison is not decided.
 

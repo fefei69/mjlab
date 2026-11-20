@@ -30,7 +30,10 @@ from mjlab.tasks.velocity.mdp.velocity_command import (
 from mjlab.viewer.debug_visualizer import DebugVisualizer
 
 TASK_ID = "Mjlab-Velocity-Flat-Unitree-Go1"
-DEFAULT_CHECKPOINT = Path("logs/rsl_rl/go1_velocity/2026-11-10_17-04-19/model_9999.pt")
+# The baseline policy, kept in the repository so the demos run after a clone.
+DEFAULT_CHECKPOINT = (
+  Path(__file__).parent / "checkpoints" / "go1_flat_baseline" / "model_9999.pt"
+)
 
 # Command ranges the policy finished training on: forward, sideways, yaw rate.
 CMD_MIN = (-1.5, -1.0, -0.7)
