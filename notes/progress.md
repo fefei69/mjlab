@@ -22,6 +22,18 @@ Still to set: the deadline and checkpoint dates.
 
 ## Log
 
+### 2026-11-20
+
+- Wrote [roles.md](roles.md): five roles, one per person. cpw takes the method role, which is the design of the planner's residual dynamics model. The other four are open.
+- No work on the items since 2026-11-12. The task list had not been pushed.
+
+### 2026-11-12
+
+- Worked out how the policy and the planner would each adapt online: history conditioning as black-box meta-RL, and a residual on the planar model re-fitted by least squares ([ideas.md](ideas.md), entries 5.6 and 3.11). Nothing built.
+- Drew the system figure, shown at the top of [ideas.md](ideas.md).
+- The comparison for the final experiments is now a two-by-two of four controllers ([ideas.md](ideas.md), entry 2.1).
+- Wrote [tasks.md](tasks.md): action items for the four teammates to pick from. Which change to test on is still open ([tasks.md](tasks.md), section 2).
+
 ### 2026-11-11
 
 - Read the plan and checked its claims about mjlab against the code. Everything it lists as built in exists. The review's suggestions are in [ideas.md](ideas.md), sections 3 to 6.

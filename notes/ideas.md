@@ -6,11 +6,17 @@ The entries so far came out of two reviews on 2026-11-11, the plan checked again
 
 ## System overview
 
-![System overview: an MPPI planner sends velocity commands to an RL tracking policy, which drives a simulated Go1. Both layers adapt online.](system.svg)
+![System overview: an MPPI planner sends velocity commands to an RL tracking policy, which drives a simulated Go1. Both layers adapt online.](system.png)
 
 *The system has two layers, and each adapts online in its own way. The planner re-fits a residual in its motion model from how the robot actually moved (entry 3.11). The policy adapts its gait through its observation history (entry 5.6). Solid boxes exist today, dashed boxes are planned, and orange marks the parts that adapt. Drawn on 2026-11-12.*
 
-When a planned part is built, move its box from the dashed group to the solid group in `system.svg`.
+The picture is `system.png`, rendered from `system.svg`. When a planned part is built, move its box from the dashed group to the solid group in `system.svg`, then render the PNG again from the repository root:
+
+```sh
+google-chrome --headless=new --no-sandbox --hide-scrollbars \
+  --force-device-scale-factor=2 --window-size=980,670 \
+  --screenshot="$PWD/notes/system.png" "file://$PWD/notes/system.svg"
+```
 
 ## 1. What makes the project interesting
 
@@ -36,24 +42,26 @@ This is reasoning, not a measured result. Entries 2.2 to 2.4 are there to make t
 
 ## 2. Experiments
 
-### 2.1 Confirm the four rows of the experiments table
+### 2.1 The four controllers to compare
 
-**Status:** `open` · 2026-11-11
+**Status:** `adopted` · 2026-11-12
 
-The table didn't come through in the copy of the plan saved here. From the plan's text, the assumed rows are:
+Decided by cpw on 2026-11-12: a two-by-two comparison, where each controller switches one layer's adaptation on or off.
 
-1. Policy without history, simple path follower.
-2. Policy with history, simple path follower.
-3. Policy with history, MPPI with a fixed motion model.
-4. Policy with history, MPPI with the online least-squares model.
+| | Planner with a fixed model | Planner that re-fits a residual online |
+|---|---|---|
+| **Policy without history** | 1. Baseline | 3. Residual only |
+| **Policy with history** | 2. History only | 4. Ours |
 
-Confirm or correct these, and paste the real table into [plan.md](plan.md).
+cpw named three of the four: ours, the policy with history alone, and the residual with a policy without history. The fourth, with neither, is filled in here as the plain baseline. The rules that keep the comparison fair and the measures are in [tasks.md](tasks.md), section 3.
+
+This replaces the rows assumed on 2026-11-11, which used a simple path follower for the first two.
 
 ### 2.2 One pair of rows must isolate the planner's adaptation
 
 **Status:** `open` · 2026-11-11
 
-Use the same policy in both rows, with the planner on a frozen motion model in one and on the online fit in the other. If the rows are as assumed in 2.1, rows 3 and 4 are already this pair.
+Use the same policy in both rows, with the planner on a frozen motion model in one and on the online fit in the other. The two-by-two comparison in 2.1 contains this pair twice, once for each policy.
 
 ### 2.3 Include damages severe enough to bias tracking
 
@@ -87,6 +95,12 @@ Turn off all three motors of one leg. This matches LLA-MPPI's "leg lock" test, w
 **Status:** `open` · 2026-11-11
 
 The baseline run from 2026-11-10 is an undamaged policy without history. Row 1 should be trained across the same damages as row 2, so that history is the only difference between them.
+
+### 2.8 Which change to test on
+
+**Status:** `open` · 2026-11-12
+
+Not decided: motor faults, a shortened leg, payload, friction, terrain, or several of them. The candidates, a proposal and the reasons are in [tasks.md](tasks.md), section 2. The proposal is to train and test on motor faults on one leg, to test on payload and friction without training on them, to keep the calf cut as a stretch goal, and to leave terrain out. Item S1 in the task list measures how much each candidate changes the robot's planar motion, so the choice can be made on data.
 
 ## 3. Planner
 

@@ -8,7 +8,9 @@ A shared notebook for the RL & OC project: a simulated Unitree Go1 that keeps wa
 |---|---|---|
 | [plan.md](plan.md) | The project plan, as a snapshot from 2026-11-11 | An idea is adopted and changes the plan |
 | [ideas.md](ideas.md) | Ideas and open questions, each with a status, and the system figure | Something new comes up, or an idea is settled |
-| [system.svg](system.svg) | The system figure shown in ideas.md: what is built and what is planned | A planned part is built |
+| [system.png](system.png) | The system figure shown in ideas.md: what is built and what is planned. [system.svg](system.svg) is its editable source. | A planned part is built |
+| [roles.md](roles.md) | The five roles in the project, for each person to pick one | Someone picks a role |
+| [tasks.md](tasks.md) | Action items for the team to pick from, with difficulty and skills, the open decision on what to test, and the four-way comparison | Someone claims or finishes an item, or a decision is made |
 | [progress.md](progress.md) | Milestone status, setup, and a dated log of work and results | After each work session |
 | [related-work.md](related-work.md) | Papers we've read: what they do and how we differ | We read a paper |
 
