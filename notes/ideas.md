@@ -412,6 +412,20 @@ Ways to check that the policy really adapts and is not just robust:
 - **History ablation at test time:** blank or shuffle the history. Performance after damage should drop.
 - **Probe:** the damage should be decodable from the policy's hidden features.
 
+### 5.7 A residual dynamics model for the walking policy too
+
+**Status:** `open` · 2026-11-20
+
+Raised by cpw: use the residual idea at both levels, in the planner and in the walking policy. The policy would get an online estimate of how the robot's dynamics have changed, as an extra input.
+
+- **The planner's residual cannot be reused as it is.** It describes the base's motion over the ground with a few numbers. It does not say which leg or joint is faulty, and that is what the policy needs in order to change its gait.
+- **A joint-level residual would.** The recipe is the same and the signal is different: a nominal model of how each joint follows its target, fitted on the healthy robot, and an online fit of that model's recent errors. A dead motor shows up as a joint that does not follow its target. The result is one or two numbers per joint.
+- **It has to be part of training.** The policy must be trained with the residual as an input, so the estimate has to be computed inside the training environment for thousands of robots at once. That is cheap to compute, but it makes the Policy role's training depend on this work.
+- **How it relates to history.** The residual is a hand-designed summary of the recent past. A history policy has to learn its own summary. So the two can be compared directly: designed adaptation against learned adaptation.
+- **Effect on the comparison in 2.1.** The two factors would become "history, yes or no" and "residual model, yes or no", with the residual feeding both layers. Telling the planner's residual apart from the policy's would need two more controllers. Not decided.
+
+Order agreed with cpw on 2026-11-20: build the planner's residual first, because it needs no training and is already designed. Build the joint-level one second, and treat it as an exploration until the first one works. Agree the joint-level residual's interface with the Policy role early. None of this is tested.
+
 ## 6. Demo and setup
 
 ### 6.1 Record the chop video in mjlab itself

@@ -26,6 +26,8 @@ Still to set: the deadline and checkpoint dates.
 
 - Wrote [roles.md](roles.md): five roles, one per person. cpw takes the method role, which is the design of the planner's residual dynamics model. The other four are open.
 - No work on the items since 2026-11-12. The task list had not been pushed.
+- Added item S4, the randomization the policies train on and the held-out set, to the Robot changes role.
+- cpw's role now covers a residual model at two levels. The planner's residual comes first. A joint-level residual given to the walking policy as an input comes second, as an exploration ([ideas.md](ideas.md), entries 3.11 and 5.7). Whether this changes the four-way comparison is not decided.
 
 ### 2026-11-12
 

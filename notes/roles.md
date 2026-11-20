@@ -1,6 +1,6 @@
 # Pick a role
 
-The project has five roles, one per person. One is taken. Read the table, then send cpw your first and second choice of the other four, with one line on your relevant experience. cpw fills in the **Owner** column once everyone has answered.
+The project has five roles, one per person. One is taken. Read the table, pick one of the other four, and reply in the team thread with the role you want. The **Owner** column is filled in from the thread.
 
 When you have your role, mark your first item "in progress" in [tasks.md](tasks.md) and push to the branch `dev`. That also checks that your setup and your push access work.
 
@@ -8,7 +8,7 @@ A role is what you are responsible for, not a wall. Ask each other for help, and
 
 | Role | What you own | Difficulty | Skills you need | GPU | Owner |
 |---|---|---|---|---|---|
-| **Method: residual dynamics model** | How the planner adapts online | Hard | Linear algebra, control, PyTorch | Some | cpw (taken) |
+| **Method: residual dynamics model** | How the system adapts online with a residual model: in the planner, and possibly in the policy | Hard | Linear algebra, control, PyTorch | Some | cpw (taken) |
 | **Robot changes** | What goes wrong with the robot mid-run | Medium | mjlab's event system, MuJoCo basics, Python | Yes | |
 | **Policy** | The walking policy, with and without history | Medium to Hard | Running PPO training, network and observation setup | Yes, a lot | |
 | **Evaluation** | The course, the measurements and the final comparison | Medium | Python, statistics, careful bookkeeping | Yes | |
@@ -19,8 +19,9 @@ A role is what you are responsible for, not a wall. Ask each other for help, and
 The planner predicts the robot's motion with a small model fitted before the run. This role designs the correction that is re-fitted during the run, so the planner notices when the robot has changed.
 
 - **You deliver:** the residual model, its online fit, and evidence that it reacts to a change within about a second.
-- **Items:** R1, R2, and R3 if time allows.
-- **Works closely with:** Robot changes, for something to adapt to, and Evaluation, for the numbers.
+- **Also exploring:** the same idea one level down, a joint-level residual given to the walking policy as an input (R5). If it works, it adds one more policy for the Policy role to train.
+- **Items:** R1, R2, R5 as an exploration, and R3 if time allows.
+- **Works closely with:** Robot changes, for something to adapt to, Policy, for R5, and Evaluation, for the numbers.
 
 ## Robot changes
 

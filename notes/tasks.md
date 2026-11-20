@@ -114,6 +114,7 @@ Difficulty is Easy, Medium or Hard. Size is S (a day or two), M (three to five d
 | R2 | Put the residual into the planner loop | Medium | M | Python, MPPI basics, plotting | Yes | R1 | cpw |
 | R3 | Command limits after a change | Hard, open question | M to L | Control intuition, designing experiments | Yes | R2 | |
 | R4 | Oracle planner (optional) | Medium | M | Simulator state handling, GPU tensors | Yes | S2, T1 | |
+| R5 | Residual model for the walking policy (exploratory) | Hard | L | Linear algebra, mjlab observations, some RL | Yes | R1 | cpw |
 | X1 | Evaluation script | Medium | M | Python, statistics, careful bookkeeping | Yes | Nothing to start | |
 | X2 | Run the four-way comparison | Easy to Medium | M | Running experiments, plotting | Yes | P1, P2, R2, X1, T1 | |
 | X3 | Final demo videos | Medium | M | Python, video tools, an eye for presentation | Yes | V2, and X2 for the final cut | |
@@ -132,7 +133,7 @@ Difficulty is Easy, Medium or Hard. Size is S (a day or two), M (three to five d
 
 The items are grouped into five roles in [roles.md](roles.md):
 
-- **Method, residual dynamics model (cpw):** R1, R2, and R3 if time allows.
+- **Method, residual dynamics model (cpw):** R1, R2, R5 as an exploration, and R3 if time allows.
 - **Robot changes:** S1, S2, S4, with S3 as a stretch.
 - **Policy:** P1, P2, P3, with P4 as an option.
 - **Evaluation:** T1, X1, X2, with W2 and R4 as options.
@@ -250,6 +251,14 @@ An upper bound for the comparison: a planner that is told the true change.
 - **Do:** plan by rolling candidate commands out in parallel copies of the simulator that have the true change applied, as the box-push demo does for the box.
 - **Done when:** it runs on the path task and gives a fifth row for the results table.
 - **Start from:** `mppi/demo_box_push.py` and `Tracker.rollout` in `mppi/tracker.py`.
+
+### R5. Residual model for the walking policy (exploratory)
+
+The same idea one level down: give the walking policy an online estimate of how its joints have changed. Background and open points are in [ideas.md](ideas.md) entry 5.7.
+
+- **Do:** fit a nominal model of how each joint follows its target on the healthy robot, estimate that model's residual online, and make it available as an observation that a policy can be trained on.
+- **Done when:** the residual separates a healthy joint from a faulty one within a fraction of a second, and it can be switched on as an observation in training.
+- **Affects the Policy role:** it would add a third policy to train, one that sees the residual. Agree the interface with them early.
 
 ### X1. Evaluation script
 
