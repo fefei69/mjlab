@@ -13,6 +13,9 @@ A shared notebook for the RL & OC project: a simulated Unitree Go1 that keeps wa
 | [tasks.md](tasks.md) | Action items for the team to pick from, with difficulty and skills, the open decision on what to test, and the four-way comparison | Someone claims or finishes an item, or a decision is made |
 | [progress.md](progress.md) | Milestone status, setup, and a dated log of work and results | After each work session |
 | [related-work.md](related-work.md) | Papers we've read: what they do and how we differ | We read a paper |
+| [proposal.tex](proposal.tex) | The two-page course proposal, in LaTeX | The proposal is revised |
+| [references.bib](references.bib) | BibTeX entries for the proposal | A reference is added |
+| [system_figure.tex](system_figure.tex) | The system figure drawn in LaTeX (TikZ), for the proposal, the report and slides. [system_figure_standalone.tex](system_figure_standalone.tex) compiles it to a PDF of its own. | The system changes |
 
 ## How we use it
 
