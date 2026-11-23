@@ -10,6 +10,12 @@ default is wider than the range the policy was trained on.
   uv run python -m mppi.demo_circle_race --model ideal   # Naive model, to compare.
   # Stay inside the trained command range (slower):
   uv run python -m mppi.demo_circle_race --cmd-min -1.5 -1 -0.7 --cmd-max 2 1 0.7
+
+A steady pull on the trunk makes the fitted model wrong. `--residual` lets the
+planner correct its model online from how the robot actually moves:
+
+  uv run python -m mppi.demo_circle_race --pull 0 -30                    # Fixed model.
+  uv run python -m mppi.demo_circle_race --pull 0 -30 --residual command
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from mjlab.viewer import ViewerConfig
 from mjlab.viewer.debug_visualizer import DebugVisualizer
 from mppi.core import Mppi, MppiCfg
 from mppi.planar_model import PlanarModel, body_velocity, wrap_angle
+from mppi.residual_model import FEATURE_SETS, ResidualCfg, ResidualModel
 from mppi.tracker import (
   CMD_MAX_FAST,
   CMD_MIN_FAST,
@@ -37,9 +44,11 @@ from mppi.tracker import (
   Tracker,
   make_tracker_cfg,
 )
-from mppi.viz import PLAN_COLOR, TRAIL_COLOR, Hud, draw_path, draw_rollouts
+from mppi.viz import PLAN_COLOR, TRAIL_COLOR, Hud, Rgba, draw_path, draw_rollouts
 
 TRACK_COLOR = (0.95, 0.95, 0.95, 1.0)
+PULL_COLOR = (1.0, 0.33, 0.62, 1.0)
+PULL_ARROW = 0.035  # Metres of arrow per newton of pull.
 
 
 def race_cost(
@@ -116,6 +125,29 @@ def main() -> None:
   p.add_argument(
     "--rollouts-shown", type=int, default=64, help="Sampled plans drawn in the video."
   )
+  p.add_argument(
+    "--pull",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("FORWARD", "LEFT"),
+    help="Steady force on the trunk in N, forward and to the left of the robot.",
+  )
+  p.add_argument("--pull-at", type=float, default=8.0, help="When the pull starts.")
+  p.add_argument(
+    "--residual",
+    choices=("off", *FEATURE_SETS),
+    default="off",
+    help="Correct the model online from the robot's motion, with these features.",
+  )
+  p.add_argument("--drift-std", type=float, default=ResidualCfg.drift_std)
+  p.add_argument("--leak", type=float, default=ResidualCfg.leak)
+  p.add_argument(
+    "--gain-drift-ratio",
+    type=float,
+    default=ResidualCfg.gain_drift_ratio,
+    help="How fast gains may change, relative to offsets. 1 treats them alike.",
+  )
   p.add_argument("--out", type=Path, default=Path("logs/mppi/circle_race.mp4"))
   p.add_argument("--device", default="cuda:0")
   p.add_argument("--seed", type=int, default=0)
@@ -132,6 +164,30 @@ def main() -> None:
     model = PlanarModel.load(model_path, args.device)
   else:
     model = PlanarModel.ideal(0.1, args.device)
+  # The model the planner uses: the fitted one, or the fitted one plus a residual
+  # that is re-fitted during the run.
+  residual: ResidualModel | None = None
+  if args.residual != "off":
+    residual = ResidualModel(
+      model,
+      FEATURE_SETS[args.residual],
+      ResidualCfg(
+        drift_std=args.drift_std,
+        leak=args.leak,
+        gain_drift_ratio=args.gain_drift_ratio,
+      ),
+    )
+  plan_model: PlanarModel | ResidualModel = residual or model
+  pull = torch.tensor(args.pull or (0.0, 0.0), device=args.device)
+  pulling = False
+  pull_text = ", ".join(
+    f"{abs(size):.0f} N {positive if size > 0 else negative}"
+    for size, positive, negative in (
+      (float(pull[0]), "forward", "backward"),
+      (float(pull[1]), "to the left", "to the right"),
+    )
+    if size != 0
+  )
 
   # Start on the track, facing along it, and watch from a fixed overhead camera.
   cfg = make_tracker_cfg(num_envs=1)
@@ -195,16 +251,32 @@ def main() -> None:
       draw_rollouts(vis, fan_xy, fan_costs, 0.02, 0.006)
     if len(plan_xy) > 0:
       draw_path(vis, plan_xy, 0.04, 0.016, PLAN_COLOR)
+    if pulling:
+      # Read the pose now: the robot moves several frames per plan step.
+      x, y, yaw = tracker.pose()[0].tolist()
+      forward, left = (PULL_ARROW * pull).tolist()
+      tip = (
+        x + math.cos(yaw) * forward - math.sin(yaw) * left,
+        y + math.sin(yaw) * forward + math.cos(yaw) * left,
+      )
+      vis.add_arrow(
+        np.array([x, y, 0.45]), np.array([*tip, 0.45]), PULL_COLOR, width=0.04
+      )
 
   tracker.set_overlay(draw)
+  legend: list[tuple[str, Rgba | str]] = [
+    ("Sampled plans (light = low cost)", "ramp"),
+    ("Chosen plan", PLAN_COLOR),
+    ("Path driven", TRAIL_COLOR),
+  ]
+  title = "MPPI circle race"
+  if args.pull is not None:
+    legend.append(("Pull on the trunk", PULL_COLOR))
+    title = "Model corrected online" if residual is not None else "Fixed model"
   hud = Hud(
-    "MPPI circle race",
+    title,
     f"Planar model · {args.samples} samples · {args.horizon:.1f} s horizon",
-    [
-      ("Sampled plans (light = low cost)", "ramp"),
-      ("Chosen plan", PLAN_COLOR),
-      ("Path driven", TRAIL_COLOR),
-    ],
+    legend,
   )
 
   # The last batch of sampled plans that MPPI scored, kept for drawing.
@@ -213,7 +285,7 @@ def main() -> None:
   def plan_cost(
     commands: torch.Tensor, pose: torch.Tensor, vel: torch.Tensor
   ) -> torch.Tensor:
-    poses, _ = model.rollout(pose, vel, commands)
+    poses, _ = plan_model.rollout(pose, vel, commands)
     costs = race_cost(
       poses,
       commands,
@@ -228,7 +300,15 @@ def main() -> None:
 
   pose = tracker.pose()[0]
   prev_pose = pose.clone()
-  log: dict[str, list[np.ndarray]] = {"pose": [], "cmd": [], "vel": []}
+  vel = torch.zeros(3, device=args.device)
+  command = torch.zeros(3, device=args.device)
+  log: dict[str, list[np.ndarray]] = {
+    "pose": [],
+    "cmd": [],
+    "vel": [],
+    "model_error": [],
+    "pulling": [],
+  }
   plan_ms: list[float] = []
   speeds: list[float] = []
   laps: list[float] = []
@@ -244,7 +324,17 @@ def main() -> None:
         media.VideoWriter(args.out, shape=(720, 1280), fps=fps)
       )
     for k in range(round(args.duration / model.dt)):
-      vel = body_velocity(prev_pose, pose, model.dt)
+      prev_vel, vel = vel, body_velocity(prev_pose, pose, model.dt)
+      # How wrong the planner's model was about the step just taken. Taken
+      # before the residual sees that step, so it is a true prediction error.
+      model_error = torch.zeros_like(vel)
+      if k > 0:
+        model_error = vel - plan_model.next_velocity(prev_vel, command)
+        if residual is not None:
+          residual.update(prev_vel, command, vel)
+      log["model_error"].append(model_error.cpu().numpy())
+      pulling = args.pull is not None and k * model.dt >= args.pull_at
+      log["pulling"].append(np.array(pulling))
 
       torch.cuda.synchronize()
       t0 = time.perf_counter()
@@ -256,7 +346,7 @@ def main() -> None:
 
       # Paths to draw, each starting at the robot.
       start = pose[:2]
-      plan_poses = model.rollout(pose, vel, plan[None])[0][0, :, :2]
+      plan_poses = plan_model.rollout(pose, vel, plan[None])[0][0, :, :2]
       plan_xy = torch.cat([start[None], plan_poses]).cpu().numpy()
       fan = scored["xy"][shown]
       fan_xy = torch.cat([start.expand(len(shown), 1, 2), fan], dim=1).cpu().numpy()
@@ -276,7 +366,20 @@ def main() -> None:
           f"vx {command[0]:+.2f}  vy {command[1]:+.2f}  wz {command[2]:+.2f}",
         ),
       ]
+      if args.pull is not None or residual is not None:
+        if args.pull is not None:
+          readouts.append(("Pull", pull_text if pulling else "none yet"))
+        # Both averaged over 1 s. The model error covers forward and sideways.
+        recent = np.stack(log["model_error"][-10:])[:, :2]
+        off = [float(np.hypot(*p[:2])) - radius for p in log["pose"][-10:]]
+        readouts += [
+          ("Correction", f"{args.residual} features" if residual else "none"),
+          ("Off centre", f"{np.mean(off):+.2f} m" if off else ""),
+          ("Model error", f"{np.sqrt((recent**2).sum(axis=1).mean()):.2f} m/s"),
+        ]
       for _ in range(hold):
+        if pulling:
+          tracker.pull_trunk(pull)
         tracker.step(command)
         if video is not None:
           video.add_image(hud.draw(tracker.render(), readouts))
@@ -290,7 +393,8 @@ def main() -> None:
       travelled += wrap_angle(
         torch.atan2(pose[1], pose[0]) - torch.atan2(prev_pose[1], prev_pose[0])
       ).item()
-      if int(travelled // (2 * math.pi)) > int(before // (2 * math.pi)):
+      # A small step backward at the start must not count as a lap.
+      if travelled // (2 * math.pi) > max(before, 0.0) // (2 * math.pi):
         laps.append((k + 1) * model.dt)
       if tracker.upright()[0] < 0.5:
         fell_at = (k + 1) * model.dt
@@ -333,6 +437,17 @@ def main() -> None:
     f"[race] Planning time: median {np.median(plan_ms):.1f} ms per plan"
     f" ({args.samples} samples, {args.iterations} iterations), budget {1e3 * model.dt:.0f} ms."
   )
+  if args.pull is not None:
+    error = np.sqrt((arrays["model_error"][:, :2] ** 2).sum(axis=1))
+    for name, part in (("Before", ~arrays["pulling"]), ("During", arrays["pulling"])):
+      if not part.any():
+        continue
+      outside = np.abs(off_centre[part]) > half_width
+      print(
+        f"[race] {name} the pull: {np.abs(off_centre[part]).mean():.2f} m from the"
+        f" centre line on average, off the track {100 * outside.mean():.0f}% of the"
+        f" time, model error {np.sqrt((error[part] ** 2).mean()):.2f} m/s."
+      )
   if not args.no_video:
     print(f"[race] Video: {args.out}")
 

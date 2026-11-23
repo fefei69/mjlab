@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import torch
 
@@ -58,6 +59,35 @@ def integrate_pose(pose: torch.Tensor, vel: torch.Tensor, dt: float) -> torch.Te
 def speed_terms(cmd: torch.Tensor) -> torch.Tensor:
   """The nine products u_i |u_j| of a (..., 3) command, shape (..., 9)."""
   return (cmd[..., :, None] * cmd[..., None, :].abs()).flatten(start_dim=-2)
+
+
+class MotionModel(Protocol):
+  """Anything that predicts the velocity over the next plan step."""
+
+  dt: float
+
+  def next_velocity(self, vel: torch.Tensor, cmd: torch.Tensor) -> torch.Tensor: ...
+
+
+def rollout_model(
+  model: MotionModel, pose: torch.Tensor, vel: torch.Tensor, commands: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Predict poses and velocities for command sequences of shape (K, H, 3).
+
+  `pose` and `vel` are the current pose and the velocity over the last plan
+  step, each (3,) or (K, 3). Returns poses and velocities of shape (K, H, 3),
+  where entry h is the state after the h-th command.
+  """
+  k, horizon, _ = commands.shape
+  pose = pose.expand(k, 3)
+  vel = vel.expand(k, 3)
+  poses, vels = [], []
+  for h in range(horizon):
+    vel = model.next_velocity(vel, commands[:, h])
+    pose = integrate_pose(pose, vel, model.dt)
+    poses.append(pose)
+    vels.append(vel)
+  return torch.stack(poses, dim=1), torch.stack(vels, dim=1)
 
 
 @dataclass
@@ -136,22 +166,8 @@ class PlanarModel:
   def rollout(
     self, pose: torch.Tensor, vel: torch.Tensor, commands: torch.Tensor
   ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Predict poses and velocities for command sequences of shape (K, H, 3).
-
-    `pose` and `vel` are the current pose and the velocity over the last plan
-    step, each (3,) or (K, 3). Returns poses and velocities of shape (K, H, 3),
-    where entry h is the state after the h-th command.
-    """
-    k, horizon, _ = commands.shape
-    pose = pose.expand(k, 3)
-    vel = vel.expand(k, 3)
-    poses, vels = [], []
-    for h in range(horizon):
-      vel = self.next_velocity(vel, commands[:, h])
-      pose = integrate_pose(pose, vel, self.dt)
-      poses.append(pose)
-      vels.append(vel)
-    return torch.stack(poses, dim=1), torch.stack(vels, dim=1)
+    """See `rollout_model`."""
+    return rollout_model(self, pose, vel, commands)
 
   def save(self, path: Path, **extra: object) -> None:
     payload = {

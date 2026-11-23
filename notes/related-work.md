@@ -49,13 +49,37 @@ It tackles the same failure as our plan, a leg disabled mid-walk on a Unitree qu
 
 Run it as a baseline. The code isn't released (the project page said only "coming soon" on 2026-11-11), it uses a Go2 where mjlab ships a Go1, and reimplementing whole-body MPPI would be a project of its own. Its model selection alone is a possible add-on: see [ideas.md](ideas.md), entry 3.3.
 
+## Online residual models (background for the method)
+
+Added on 2026-11-20. The planner's residual model ([ideas.md](ideas.md), entry 3.11) was not taken from one paper. It combines two standard parts: a nominal model with a correction learned online, and an online update of its coefficients. The built version (2026-11-20) uses a Kalman filter with a leak toward zero, as Neural-Fly does, rather than recursive least squares with forgetting. The papers below are the closest uses of the first part. Each was checked by web search against its abstract only. Neural-Fly's method was then read further on 2026-11-20: its supplement directly, its methods section through a summary. None of the others has been read in full.
+
+| Paper | Nominal model | What is fitted online | Planner |
+|---|---|---|---|
+| Fu, Levine, Abbeel, IROS 2016, [arXiv 1509.06841](https://arxiv.org/abs/1509.06841) | Neural network trained on earlier tasks | A local linear model, with the network as its prior | MPC |
+| Kabzan et al., RA-L 2019, [arXiv 1711.06586](https://arxiv.org/abs/1711.06586) for the earlier version | Simple vehicle model | A Gaussian process on the model's error | MPC, on a real race car |
+| Nagabandi et al., ICLR 2019, [arXiv 1803.11347](https://arxiv.org/abs/1803.11347) | Meta-trained neural network | The whole network, by a few gradient steps on recent data | MPPI, on a legged robot that loses a leg |
+| Neural-Fly, O'Connell et al., Science Robotics 2022, [arXiv 2205.06908](https://arxiv.org/abs/2205.06908) | Drone model | Linear coefficients on features learned offline | None. A tracking controller |
+| RTE, Chatzilygeroudis et al., 2018, [arXiv 1610.04213](https://arxiv.org/abs/1610.04213) | Outcomes of pre-computed behaviors, simulated on the intact robot | Gaussian processes on the gap between simulated and observed outcomes | Tree search, on a six-legged robot with a missing leg |
+
+How ours relates to them:
+
+- **Closest in the math: Neural-Fly.** Its online part also updates a few linear coefficients with a regularized recursive rule. Its features are learned offline from data. Ours are chosen by hand (the command and a constant). Learned features are the natural step up if the hand-chosen ones prove too weak.
+- **Closest in the structure: RTE.** A planner chooses among high-level behaviors of a legged robot, and an online model corrects what each behavior is predicted to do after damage. Our velocity commands play the role of its behaviors.
+- **Closest in the task: Nagabandi et al.** Same planner and same kind of failure, but the model predicts the low-level dynamics and there is no walking policy underneath.
+
+A different way to use an online estimate: keep the planner's model fixed and cancel the disturbance below the planner. L1-adaptive MPPI (Pravitra et al., 2020, [arXiv 2004.00152](https://arxiv.org/abs/2004.00152), simulation only) does this for drones. A disturbance observer is equivalent to fitting only the offset in our residual. LLA-MPPI's disturbance-observer baseline scored 0 of 50 on leg lock (table above). That was in whole-body control with no adapting policy underneath, so it does not settle our case, but it is the result a reader will hold against us.
+
+The fitting rule itself, recursive least squares with a forgetting factor, is textbook adaptive control (Ljung, *System Identification*; Åström and Wittenmark, *Adaptive Control*).
+
+Not found: a paper that fits a small linear residual on a planar velocity model above an RL walking policy. The search was eight queries for papers already known to us, so this is not evidence that none exists.
+
 ## From the plan's references
 
 Descriptions are the plan's own. These haven't been reviewed in the notes yet.
 
 - **LocoFormer** (Skild AI, CoRL 2025): the leg-chop adaptation demo that motivates this project.
 - **Learning to Adapt in Dynamic, Real-World Environments** (Nagabandi et al., ICLR 2019): meta-learned models with MPC, including a robot that loses a leg. Its model also adapts online, which matters for how we state our contribution (ideas.md, entry 1.1).
-- **DATT** (CoRL 2023): an RL policy paired with an online adaptive estimator.
+- **DATT** (Huang et al., CoRL 2023, [arXiv 2310.09053](https://arxiv.org/abs/2310.09053)): an RL policy paired with an online adaptive estimator. From its abstract, checked on 2026-11-20: in training the policy is given the true disturbance force, and in flight it is given an online estimate of it. That is the pattern for the joint-level residual fed to our policy (ideas.md, entry 5.7).
 
 ## To read
 

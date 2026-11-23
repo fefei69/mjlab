@@ -7,7 +7,7 @@
 | 1 | Baseline: train Go1 velocity tracking | Done | The flat-terrain run from 2026-11-10 tracks velocity commands. It is an undamaged policy without history, so it is a reference point, not row 1 of the experiments table. |
 | 2 | Damage injection | Not started | Design notes are in [ideas.md](ideas.md), section 4. |
 | 3 | Meta-RL policy | Not started | |
-| 4 | Planner | Started | MPPI, the planar model and its least-squares fit exist and run on the undamaged policy in two demos (2026-11-11). Still missing: re-fitting the model online, and a path task with damage. |
+| 4 | Planner | Started | MPPI, the planar model and its least-squares fit exist and run on the undamaged policy in two demos (2026-11-11). The online residual model exists, is tested on made-up data, and runs in the race loop against a steady pull on the trunk (2026-11-20). Still missing: a safe default for its features, and a path task with damage. |
 | 5 | Evaluation and demo | Not started | |
 
 Still to set: the deadline and checkpoint dates.
@@ -20,8 +20,25 @@ Still to set: the deadline and checkpoint dates.
 - **Training budget:** 10,000 PPO iterations with 4096 environments take 1 h 14 min, so several runs fit in a day.
 - **Results:** everything under `logs/` is ignored by git and exists only on the training PC.
 - **Shared baseline:** the final baseline checkpoint and its fitted planar model are also in the repository, in `mppi/checkpoints/go1_flat_baseline/`, and the demos load them from there by default.
+- **Running tests on the training PC:** its shell puts ROS on Python's path, and pytest then fails before it starts. Run tests as `env -u PYTHONPATH uv run pytest mppi/tests`. `make check` needs no such change.
 
 ## Log
+
+### 2026-11-23
+
+- **Residual: gains now drift slower than offsets** (`ResidualCfg.gain_drift_ratio`, default 1/3, option `--gain-drift-ratio`). On the 30 N pull test the 12-coefficient residual went from 2 falls in 10 runs to 0, off the track 0% (0 to 2%) during the pull, progress 1.83 m/s. Cost: 11 to 24% of steps over the inside edge before the pull, against 0 to 8%. Details and the full table in [ideas.md](ideas.md), entry 3.11, "Third step". Not committed yet.
+
+### 2026-11-21
+
+- Wrote the course proposal, [proposal.tex](proposal.tex): repository link, description, tools, algorithms, planned work with experiments and expected results, and preliminary work. The limit is two pages.
+- **Not compiled.** There is no LaTeX on the training PC. Its length is an estimate from font metrics: about 1.9 pages at 10 pt with 0.7 in margins. Compile it before submitting.
+- **Checked:** every number against the raw run logs and the code, and all seven references against the papers.
+- **Still to do before submitting:** put the team members' names in the title block, and commit and push the residual code and these notes, because the proposal links to the branch `dev` and describes work that is not on it yet.
+- **Stated as the plan in the proposal, still open in these notes:** motor faults on one leg as the damage ([tasks.md](tasks.md), section 2), and a recovery time of about 2 s as the expected result for the policy with history, taken from "a second or two" in [ideas.md](ideas.md), entry 5.6.
+- Drew the system as a LaTeX figure, [system_figure.tex](system_figure.tex): the control chain from task cost to robot, the planner's motion model with its residual and Kalman filter, the feedback paths, and the damage. Shaded boxes are the parts that adapt online. Unlike [system.png](system.png) it does not mark what is built and what is planned.
+- **The figure is not compiled either,** for the same reason as the proposal. Its layout was checked with a preview drawn from the same coordinates (`logs/mppi/system_figure_preview.png`, on the training PC only), which shows no overlaps.
+- **The figure is now inside the proposal,** inline, so the proposal stays one file to paste into Overleaf. To make room, the title went to one line and the text lost what the figure shows (the rates and command components, where the planner's command goes) plus a few details: the heading term of the cost, the planning-time expected result (still under preliminary work), and the description of the joint-level residual. Estimated length with the figure: 1.91 pages. Still not compiled here.
+- **New fact from checking the proposal:** on the healthy robot, before the pull, the 3- and 6-coefficient residuals put the robot over the inside edge of the track in 20 to 30% of the plan steps, by up to 7.5 cm (ten runs each). The fixed model never does. The 12-coefficient residual does so in 0 to 7.5% of the steps.
 
 ### 2026-11-20
 
@@ -30,6 +47,61 @@ Still to set: the deadline and checkpoint dates.
 - Put the baseline checkpoint (4.6 MB) and its planar model into the repository, in `mppi/checkpoints/go1_flat_baseline/`, so teammates can run the demos straight after a clone.
 - Added item S4, the randomization the policies train on and the held-out set, to the Robot changes role.
 - cpw's role now covers a residual model at two levels. The planner's residual comes first. A joint-level residual given to the walking policy as an input comes second, as an exploration ([ideas.md](ideas.md), entries 3.11 and 5.7). Whether this changes the four-way comparison is not decided.
+- Sent the roles message to the team. No role picks recorded yet.
+- Looked up where the residual idea stands in the literature ([related-work.md](related-work.md), "Online residual models"). cpw chose Neural-Fly as the design to follow.
+- Built the first step of the planner's residual model (item R1), described below. Not committed yet.
+- Put the residual into the race loop and tested it against a steady pull on the trunk (item R2, first version), described below. Not committed yet.
+
+**Online residual model, first step.** The fitted planar model stays fixed and a residual on top of it is fitted during the run, by Neural-Fly's update: a Kalman filter on a few coefficients, with a leak toward zero. The features are a replaceable part, hand-chosen for now. This step checked it on made-up data only, where the true change is known.
+
+| File | What it does |
+|---|---|
+| `mppi/residual_model.py` | The residual model, its online update, and three hand-chosen feature sets (3, 6 and 12 coefficients). |
+| `mppi/residual_check.py` | Makes up runs with a known change, measures how fast and how noisily the fit follows it, and draws the figure. |
+| `mppi/tests/test_residual_model.py` | Five tests, about 3 s. |
+| `mppi/planar_model.py` | Changed: the rollout loop is now a shared function, so the corrected model can be rolled out like the fitted one. The race demo runs as before (lap 5.5 s). |
+
+Results with the default settings, 8 runs per number, 12-coefficient features:
+
+| Commands | Change | Model error removed in the first second | In the second | Later |
+|---|---|---|---|---|
+| Varied | 30% weaker | 51% | 77% | 75% |
+| Varied | Steady drift | 58% | 80% | 85% |
+| Varied | Veer growing with speed | 54% | 72% | 74% |
+| Race-like | 30% weaker | 64% | 88% | 89% |
+| Race-like | Steady drift | 63% | 85% | 85% |
+| Race-like | Veer growing with speed | 64% | 89% | 90% |
+
+- While the robot is healthy the residual wanders by about a quarter of the nominal model's usual error.
+- The target of "about a second" is not met: it is closer to two. The full findings and what stays open are in [ideas.md](ideas.md), entry 3.11.
+- Figure: `logs/mppi/residual_check.png`, on the training PC only.
+
+```sh
+uv run python -m mppi.residual_check
+env -u PYTHONPATH uv run pytest mppi/tests
+```
+
+**Residual in the race loop, against a pull on the trunk.** The race demo can now pull on the trunk with a steady force (`--pull`) and plan with the corrected model (`--residual`). The test: healthy for 8 s, then 30 N to the robot's right for 22 s. Ten runs per row, because runs with the same seed differ.
+
+| Planner's model | Falls | Time off the track during the pull | Progress along the track, 15 to 30 s |
+|---|---|---|---|
+| Fixed | 0 of 10 | 90% (87 to 92%) | 1.64 m/s |
+| Corrected, offset per axis | 0 of 10 | 0% (0 to 4%) | 1.73 m/s |
+| Corrected, gain and offset per axis | 0 of 10 | 0% (0 to 3%) | 1.73 m/s |
+| Corrected, 12 coefficients | 2 of 10 | 0% (0 to 20%) in the runs that stayed up | 2.00 m/s in the runs that stayed up |
+
+- The correction keeps the robot on the track. The fixed model lets it be pulled 0.14 m off the track and stay there.
+- The 12 coefficients are not safe yet: when the pull starts the planner brakes hard and swings its commands, and the robot fell in 2 of 10 runs. The offset alone is smooth. The likely cause and a scratch test of a fix are in [ideas.md](ideas.md), entry 3.11, "Second step".
+- On the healthy robot the correction makes the commands jumpier, and with the offset alone the robot is over the inside edge 28% of the time, by up to 6 cm.
+- Changed files: `mppi/demo_circle_race.py` (the two options, three more readouts in the video panel, and a fix to a lap counted at the start), `mppi/tracker.py` (`pull_trunk`), `mppi/residual_model.py` (the list of feature sets moved here).
+- Videos, on the training PC only: `logs/mppi/pull_compare.mp4` (fixed model beside the offset correction), `logs/mppi/pull_fixed.mp4`, `logs/mppi/pull_corrected.mp4`, and `logs/mppi/pull_command_fall.mp4` (a fall with the 12 coefficients).
+
+```sh
+uv run python -m mppi.demo_circle_race --pull 0 -30 --out logs/mppi/pull_fixed.mp4
+uv run python -m mppi.demo_circle_race --pull 0 -30 --residual offset --out logs/mppi/pull_corrected.mp4
+ffmpeg -i logs/mppi/pull_fixed.mp4 -i logs/mppi/pull_corrected.mp4 \
+  -filter_complex "[0:v]pad=iw+8:ih:0:0:black[l];[l][1:v]hstack" logs/mppi/pull_compare.mp4
+```
 
 ### 2026-11-12
 

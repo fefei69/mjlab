@@ -110,8 +110,8 @@ Difficulty is Easy, Medium or Hard. Size is S (a day or two), M (three to five d
 | P2 | Train the policy with history | Medium to Hard | M to L | PPO training, observation and network setup | Yes | S2 | |
 | P3 | Show that the history policy really adapts | Medium | M | PyTorch, plotting, analysing a trained network | Yes | P2 | |
 | P4 | Train on wider command ranges (optional) | Easy to Medium | S to M | PPO training setup | Yes | Nothing | |
-| R1 | Online residual model | Medium | M | Linear algebra (least squares), PyTorch, pytest | No | Nothing | cpw |
-| R2 | Put the residual into the planner loop | Medium | M | Python, MPPI basics, plotting | Yes | R1 | cpw |
+| R1 | Online residual model | Medium | M | Linear algebra (least squares), PyTorch, pytest | No | Nothing | cpw (first step built) |
+| R2 | Put the residual into the planner loop | Medium | M | Python, MPPI basics, plotting | Yes | R1 | cpw (first version runs) |
 | R3 | Command limits after a change | Hard, open question | M to L | Control intuition, designing experiments | Yes | R2 | |
 | R4 | Oracle planner (optional) | Medium | M | Simulator state handling, GPU tensors | Yes | S2, T1 | |
 | R5 | Residual model for the walking policy (exploratory) | Hard | L | Linear algebra, mjlab observations, some RL | Yes | R1 | cpw |
@@ -229,12 +229,14 @@ The planner's own adaptation. This item is pure math and code, with no simulator
 - **Do:** keep the offline model fixed and fit a small correction on top of it from recent motion, by least squares that forgets old samples and is pulled toward zero. Start with a gain and an offset per axis.
 - **Done when:** tests on made-up data pass. A sudden change in gain or offset is recovered within about a second of samples, no change leaves the residual near zero, and constant commands do not make it blow up.
 - **Start from:** `PlanarModel` in `mppi/planar_model.py` and the design in [ideas.md](ideas.md) entry 3.11.
+- **Status on 2026-11-20:** the first step is built, following Neural-Fly, with hand-chosen features (`mppi/residual_model.py`, `mppi/residual_check.py`, tests in `mppi/tests/`). The tests pass. Of the three conditions, two hold and one holds in part: a change is recovered in about two seconds, not one. Results are in [ideas.md](ideas.md) entry 3.11. Still to do in this item: features learned offline, once there is data from real changes.
 
 ### R2. Put the residual into the planner loop
 
 - **Do:** re-fit the residual at every planning step during a run and let MPPI plan with it. Test it on the existing policy with simple changes, before P1 and P2 exist.
 - **Done when:** a plot shows the residual jumping when a change is applied, and a comparison shows path error with the fixed model against the residual model.
 - **Start from:** the loop in `mppi/demo_circle_race.py`. It already measures the two things the fit needs at every step: the command sent and the velocity that resulted.
+- **Status on 2026-11-20:** a first version runs. `--residual` in the race demo plans with the corrected model and `--pull` applies a steady force to the trunk. Under a 30 N sideways pull the fixed model leaves the track 90% of the time and the corrected one 0 to 4%, over ten runs each. The 12-coefficient features made the robot fall in 2 of 10 runs. The plot of the residual over time is not made yet. Results are in [ideas.md](ideas.md) entry 3.11, "Second step".
 
 ### R3. Command limits after a change
 

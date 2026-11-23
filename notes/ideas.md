@@ -223,9 +223,9 @@ Even with the terms the model is still optimistic at the limit. Terms that depen
 
 ### 3.11 How the planner would adapt online
 
-**Status:** `open` · 2026-11-12
+**Status:** `adopted` · raised 2026-11-12, design agreed and first step built 2026-11-20
 
-Not built yet. Today the planar model is fitted once, offline, and stays fixed during a run.
+The residual model and its online fit exist and pass their tests on made-up data (see "First step" at the end of this entry). They are not in the planner's loop yet, so in the demos the planar model is still fitted once, offline, and stays fixed during a run. The paragraphs below are kept as written at the time, and later ones revise earlier ones.
 
 The MPPI algorithm itself would not change. Only the model it plans with would: its parameters would be re-fitted during the run from the robot's own recent motion. Each plan step already produces one sample for that fit, namely the velocity over the last step, the command that was sent, and the velocity that resulted. The steps would be:
 
@@ -272,12 +272,105 @@ The third row checks that the residual does not react to noise. Undoing a change
 Order of work:
 
 1. **Made-up data.** Change a gain or an offset of the nominal model by a known amount, add noise, and check that the fit recovers it and how fast. Only here is the true answer known.
-2. **A steady force on the trunk** in the simulator. mjlab can apply an external force to a body, so this needs no new environment code. Not tried in our setup yet.
+2. **A steady force on the trunk** in the simulator. mjlab can apply an external force to a body, so this needs no new environment code. Tried on 2026-11-20, see "Second step" below.
 3. **Motor faults,** once item S2 in [tasks.md](tasks.md) provides them, so there is one implementation of the changes and not two.
 
 Keep the development set apart from the test set. A few numbers get tuned on these changes: how fast the fit forgets, how strongly it is pulled toward zero, and which parameters it fits. Tuning them on the changes used in the final comparison would give this controller an unfair advantage over the other three, so the held-out set from item S4 stays unseen during development.
 
 The residual is fitted during the run and not trained, so this is a development set of changes, not domain randomization in the training sense.
+
+Design agreed with cpw on 2026-11-20: follow Neural-Fly ([related-work.md](related-work.md)), with hand-chosen features as the baseline row.
+
+Neural-Fly writes the residual as learned features times a few coefficients, `residual = Φ(v, u) · a`. A small network Φ is trained offline and then frozen. Only the coefficients `a` are fitted during the run. In the paper Φ has 4 outputs shared by the three force axes, so 12 coefficients adapt online, the same count as our larger hand-chosen option.
+
+What this would change for us:
+
+- **The online fit stays the same kind of thing.** The paper's update is a Kalman filter on `a` with a leak toward zero. Per plan step, with `e` the nominal model's error, and without the paper's extra tracking-error term, which needs a tracking controller that we do not have at this level:
+
+  ```
+  a⁻ = (1 − λ dt) a                      # leak toward zero
+  P⁻ = (1 − λ dt)² P + Q dt              # stay ready to change
+  K  = P⁻ Φᵀ (Φ P⁻ Φᵀ + R dt)⁻¹
+  a  = a⁻ − K (Φ a⁻ − e)                 # correct by the prediction error
+  P  = (I − K Φ) P⁻ (I − K Φ)ᵀ + K R dt Kᵀ
+  ```
+
+  The three knobs are the leak `λ`, how fast `a` may move `Q`, and the measurement noise `R`. This replaces the running-sums form sketched earlier and does the same job. The paper proves convergence without requiring varied inputs, which is our constant-commands problem.
+- **A new offline stage.** Φ is trained on motion data from several different changes, so that for each change a least-squares `a` explains that change's errors. The paper used six wind conditions and 12 minutes of flight. It also trains a second network against Φ, to keep information about the condition out of the features. We would start without that.
+- **The sentence above no longer holds.** The features would be trained on changes, so the planner gets a training set of changes too, and its held-out set must stay unseen for the same reason as the policy's.
+- **Data needs the robot to stay up.** The data comes from the robot walking under each change, so it needs a policy that does not fall under them, and it must be collected again for each policy, because the planar motion depends on the policy underneath.
+- **It gives us our ablation.** The paper compares its learned features against a constant feature, which is a disturbance observer, and the learned ones win. Ours would be three rows: offset only, hand-chosen features (command and constant), learned features.
+
+The first step is unchanged: build the online update with the features as a replaceable part, and test it on made-up data with the hand-chosen features. Learned features come after there is data from real changes.
+
+How sure: the update equations were read from the paper's supplement. The network sizes and the details of the offline training come from a summary of its methods section and have not been checked against the text.
+
+**First step, built on 2026-11-20.** The code is `mppi/residual_model.py`, the made-up-data check is `mppi/residual_check.py`, and the tests are in `mppi/tests/`. Everything below was measured on made-up data unless it says otherwise: the fitted planar model plus a change we chose, plus noise shaped like the gait's. The simulator results are under "Second step" below.
+
+What was built:
+
+- **The update above, with the features as a replaceable part.** Three hand-chosen feature sets exist: an offset per axis (3 coefficients, a disturbance observer), a gain and an offset per axis (6), and every axis responding to all three commands plus an offset (12).
+- **Two scalings that were not in the earlier sketch.** The features see the velocity and command divided by the command range. The residual is expressed in units of the nominal model's usual error on the healthy robot, per axis (0.10 m/s, 0.06 m/s, 0.06 rad/s, from the fit's report). With both, one setting suits every axis, and the 12-coefficient set follows noise about half as much as without them.
+- **Two knobs.** `drift_std` (default 0.6) sets the speed: higher reacts faster and follows noise more. `leak` (default 0.1 per second) returns coefficients to zero when the data says nothing about them.
+
+What was found:
+
+| Finding | Numbers |
+|---|---|
+| It reacts in about two seconds, not one | With the 12 coefficients it removes 51 to 64% of the new model error in the first second after a change and 72 to 89% in the second. Raising `drift_std` to 0.9 gains 6 points in the first second and costs a third more jitter. |
+| It returns to zero when the change is undone | The residual after the undo is the same size as before the change: about 0.25 of the usual error. |
+| The leak is needed when commands hardly vary | Five healthy minutes of race-like commands with no leak: the coefficient uncertainty keeps growing (7.4 and rising) and the residual predicted at standstill wanders to 0.52 usual errors. With the default leak: 1.1 and 0.20. |
+| Which features are needed depends on the change | Under varied commands, the offset alone removes 41% of a "weaker" change in the long run, against 78% for gain and offset. Only the 12 coefficients follow a veer that grows with speed: 74%, against 53% and 48%. |
+| Under race commands the feature sets are equal | All three remove 85 to 92%, because the commands hardly vary and an offset explains everything. Simpler is then slightly better. |
+| The healthy residual is not zero on the real robot | On the recorded healthy race the nominal model is off by -0.5, -0.6 and -1.0 usual errors on average (forward, sideways, yaw), because the race sits at the edge of the range the model was fitted on. The residual learns exactly that. So the residual's size is a damage signal only against its healthy level. |
+| Most of the remaining error is the gait | On that recorded race the residual lowers the one-step error only from 1.25 to 1.09 usual errors. The error is strongly periodic: its correlation with itself reaches plus or minus 0.7 at delays of 0.2 to 0.5 s. These features cannot predict that. The made-up noise copies it roughly, as 70% of the variance in one wave with a period of 1/3 s. |
+
+Open after this step:
+
+- **Is two seconds fast enough?** It was in the one case tried so far, the pull under "Second step" below, which is an easy one. If it turns out not to be, the gait wave is the thing to remove first, for example by averaging the velocity over one gait period before fitting. Not tried.
+- **A held command hides the gain.** While a command is held, only the correction at that command is learned. The split between gain and offset arrives when the command next changes. This is the limit noted above, now measured: in the constant-command test the correction at standstill is 2.1 usual errors where the truth is 3.4.
+- **The made-up noise is white plus one wave.** The real gait's error may depend on speed. The recorded race is the only real data used so far, and it is healthy and at one operating point.
+
+**Second step, tried on 2026-11-20: a steady pull on the trunk, with the residual in the race loop.** The race demo gained two options: `--pull` applies a steady horizontal force to the trunk that turns with the robot, and `--residual` lets MPPI plan with the corrected model, updated at every plan step. The test is the circle race (radius 2.5 m, track 0.4 m to each side), healthy for 8 s, then a 30 N pull to the robot's right, which is outward. Ten runs of 30 s per row. Runs with the same seed differ, so the rows are counts over runs, not single results.
+
+| Planner's model | Falls | Time off the track during the pull | Where it settles | Progress along the track, 15 to 30 s |
+|---|---|---|---|---|
+| Fixed (no correction) | 0 of 10 | 90% (87 to 92%) | 0.54 m outside the centre line, so 0.14 m off the track | 1.64 m/s |
+| Offset per axis (3 coefficients) | 0 of 10 | 0% (0 to 4%) | 0.32 m outside, on the track | 1.73 m/s |
+| Gain and offset per axis (6) | 0 of 10 | 0% (0 to 3%) | 0.31 m outside, on the track | 1.73 m/s |
+| All commands and offset (12) | 2 of 10 | 0% (0 to 20%) in the runs that stayed up | Near the centre line | 2.00 m/s in the runs that stayed up |
+
+What this shows:
+
+- **The correction does its job at the task level.** With the fixed model the robot is pulled off the track and stays off, while its plans keep pointing back inside. With any of the three feature sets it settles inside the track.
+- **The planner's model is less wrong, but not back to healthy.** One-step error in forward and sideways velocity: 0.17 m/s healthy, 0.38 m/s under the pull with the fixed model, 0.25 m/s with the correction.
+- **The 12 coefficients make the planner jerk when the pull starts, and the robot can fall.** In the two seconds after the pull starts the planner brakes from 3 m/s to under 1 m/s and swings its commands across their range: the command changes by 0.92 per plan step, against 0.14 with the fixed model and 0.16 with the offset alone. Both falls came 1.6 to 1.8 s after the pull started. A third fall, in a run made for the video, came 7 s after the pull started: the robot never settled, moving at about 1 m/s and swinging between 0.2 and 0.8 m outside the centre line until it fell. So the trouble is not always over after two seconds.
+- **The likely cause is the limit in entry 3.1.** While the commands are held, a steady pull and a drift that grows with forward speed look the same, so the 12 coefficients blame part of the pull on the forward command and the planner brakes. This is a reading of the logs, not proven. One scratch test supports it: with the gain features weighted at a third of the offset's, 0 of 10 runs fell, the robot was off the track 0% of the time (0 to 15%), and progress was 1.83 m/s. That variant is not in the code.
+- **Two seconds was fast enough here, in an easy case.** The robot starts on the inside edge, so it has 0.75 m of room before it leaves the track, and it drifts outward for about three seconds before settling.
+- **The correction costs something on the healthy robot.** With the offset alone the commands change three times as much per step before the pull (0.43 against 0.14) and the robot is over the inside edge 28% of the time, by up to 6 cm. The fixed model stays just inside. With the 12 coefficients the healthy robot runs nearer the centre line and laps in 5.8 to 5.9 s against 5.5 to 5.6 s (one run each, no pull).
+
+Open after this step:
+
+- **Which feature set is the method's default.** The offset alone is safe and is the disturbance-observer baseline. The 12 coefficients track better once settled and are unsafe in the transient. A slower prior on the gains, as in the scratch test, is the obvious thing to build and test next. Built and tested on 2026-11-23, see the third step below.
+- **Only one pull was tested in depth.** Single runs with a 20 N pull to the right, a 30 N pull to the left and a 30 N drag backward went the same way, but one run each is not evidence.
+- **The pull is not leg damage.** It is a steady offset, which is the case an offset feature fits exactly. Motor faults (step 3) are where richer features should matter.
+
+**Third step, 2026-11-23: gains drift slower than offsets.** `ResidualCfg.gain_drift_ratio` (default 1/3) lets gain coefficients drift at a third of `drift_std`, offsets at the full rate. Gains are found automatically: the coefficients whose features are zero at rest. While the commands are held, a steady push can be explained by an offset or by a gain on the forward command; with equal rates the filter split it, and the planner braked to shrink a drift that does not depend on speed. Now such an error goes to the offset first. Same pull test, ten runs per row:
+
+| Planner's model | Falls | Off the track during the pull | Off the track before the pull | Progress 15 to 30 s | Command change, first 2 s of the pull |
+|---|---|---|---|---|---|
+| Gain and offset (6), equal rates | 0 of 10 | 0% (0 to 3%) | 20 to 29% | 1.74 m/s | 0.58 |
+| Gain and offset (6), slow gains | 0 of 10 | 0% (0 to 3%) | 26 to 31% | 1.75 m/s | 0.34 |
+| All commands and offset (12), equal rates | 2 of 10 | 0% (0 to 20%), runs that stayed up | 0 to 8% | 2.01 m/s, runs that stayed up | 1.05 |
+| All commands and offset (12), slow gains | 0 of 10 | 0% (0 to 2%) | 11 to 24% | 1.83 m/s | 0.52 |
+| Offset only (3), for reference | 0 of 10 | 0% (0 to 4%) | 24 to 30% | 1.74 m/s | 0.17 |
+
+"Command change" is the summed absolute change of the three commands per plan step, averaged over the first 2 s of the pull. The fixed model gives 0.14.
+
+- The 12 coefficients no longer fall, and their transient is half as jerky. They now beat the offset alone on this test: same safety, faster, and less time over the inside edge before the pull.
+- The cost: the healthy 12-coefficient robot is over the inside edge 11 to 24% of the time before the pull, against 0 to 8% with equal rates.
+- On made-up data (`residual_check`), gain-type changes are learned more slowly with varied commands: the share of the error removed after two seconds drops from 75% to 62% for "weak" and from 74% to 64% for "veer". Two unit tests were loosened for this, and one was added (`test_steady_push_goes_to_the_offsets`).
+- Proposed default: 12 coefficients with slow gains, to be confirmed on motor faults, where gain changes are expected.
 
 ## 4. Damage injection
 

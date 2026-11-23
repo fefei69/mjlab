@@ -130,6 +130,7 @@ class Tracker:
     self.policy: Policy = policy
 
     self.robot: Entity = self.env.scene["robot"]
+    self._trunk = self.robot.find_bodies("trunk")[0]
     twist = self.env.command_manager.get_term("twist")
     assert isinstance(twist, UniformVelocityCommand)
     self._twist = twist
@@ -183,6 +184,31 @@ class Tracker:
     # Refresh kinematics and sensors, which the next observation reads.
     self.env.sim.forward()
     self.env.sim.sense()
+
+  # Disturbance.
+
+  def pull_trunk(self, force: torch.Tensor) -> None:
+    """Pull on the trunk with a horizontal force, in newtons.
+
+    `force` is (2,) or (num_envs, 2): forward and to the left, in the frame that
+    turns with the robot's heading. MuJoCo holds the force fixed in the world
+    until the next call, so call this before every step to keep it turning with
+    the robot.
+    """
+    force = force.expand(self.num_envs, 2)
+    yaw = self.robot.data.heading_w
+    cos, sin = torch.cos(yaw), torch.sin(yaw)
+    world = torch.stack(
+      [
+        cos * force[:, 0] - sin * force[:, 1],
+        sin * force[:, 0] + cos * force[:, 1],
+        torch.zeros_like(yaw),
+      ],
+      dim=-1,
+    )
+    self.robot.write_external_wrench_to_sim(
+      world[:, None], torch.zeros_like(world[:, None]), body_ids=self._trunk
+    )
 
   # Stepping.
 
