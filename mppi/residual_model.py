@@ -99,12 +99,26 @@ class ResidualCfg:
 
 
 class ResidualModel:
-  """The nominal model plus a residual whose coefficients are fitted online."""
+  """The nominal model plus a residual whose coefficients are fitted online.
+
+  With `num_envs` set, it keeps one set of coefficients per robot: `update` takes
+  (num_envs, 3) inputs, and `residual` and `rollout` take inputs whose leading
+  dimension is the robot.
+  """
 
   def __init__(
-    self, nominal: PlanarModel, features: Features, cfg: ResidualCfg | None = None
+    self,
+    nominal: PlanarModel,
+    features: Features,
+    cfg: ResidualCfg | None = None,
+    num_envs: int | None = None,
   ) -> None:
     self.nominal = nominal
+    self.num_envs = num_envs
+    # The filter runs in double precision: the covariance update loses symmetry
+    # in single precision. One robot's filter is a few tiny matrices, which the
+    # CPU does faster; many robots run on the nominal model's device.
+    self._device = torch.device("cpu") if num_envs is None else nominal.a.device
     self.features = features
     self.cfg = cfg or ResidualCfg()
     self.dt = nominal.dt
@@ -122,25 +136,34 @@ class ResidualModel:
     self.num_coef = self.is_gain.numel()
     rate = torch.full((self.num_coef,), self.cfg.drift_std, dtype=torch.float64)
     rate[self.is_gain] *= self.cfg.gain_drift_ratio
-    self._drift_var = torch.diag(rate**2)
+    self._drift_var = torch.diag(rate**2).to(self._device)
+    batch = 1 if num_envs is None else num_envs
+    p = self.num_coef
+    self._coef = torch.zeros(batch, p, dtype=torch.float64, device=self._device)
+    self._cov = torch.zeros(batch, p, p, dtype=torch.float64, device=self._device)
     self.reset()
 
-  def reset(self) -> None:
-    """Forget everything: the model is the nominal model again."""
-    # The filter runs in double precision on the CPU. It is a few tiny matrices,
-    # and the covariance update loses symmetry in single precision.
-    self._coef = torch.zeros(self.num_coef, dtype=torch.float64)
-    self._cov = torch.zeros(self.num_coef, self.num_coef, dtype=torch.float64)
+  def reset(self, env_ids: torch.Tensor | None = None) -> None:
+    """Forget everything: the model is the nominal model again.
+
+    With `env_ids`, only for those robots.
+    """
+    ids = slice(None) if env_ids is None else env_ids.to(self._device)
+    self._coef[ids] = 0.0
+    self._cov[ids] = 0.0
     self._publish()
 
   def _publish(self) -> None:
-    # The copy the rollouts use, on the nominal model's device.
-    self.coef = self._coef.to(self.nominal.a)
+    # The copy the rollouts use, on the nominal model's device: (P,) for one
+    # robot, (num_envs, P) for many.
+    coef = self._coef.to(self.nominal.a)
+    self.coef = coef[0] if self.num_envs is None else coef
 
   @property
   def coef_std(self) -> torch.Tensor:
-    """(P,) how uncertain the filter is about each coefficient."""
-    return self._cov.diagonal().sqrt().to(self.nominal.a)
+    """(P,) or (num_envs, P): how uncertain the filter is about each coefficient."""
+    std = self._cov.diagonal(dim1=-2, dim2=-1).sqrt().to(self.nominal.a)
+    return std[0] if self.num_envs is None else std
 
   # Prediction.
 
@@ -149,7 +172,10 @@ class ResidualModel:
 
   def residual(self, vel: torch.Tensor, cmd: torch.Tensor) -> torch.Tensor:
     """The correction to the nominal model's next velocity, shape (..., 3)."""
-    return self._out_scale * (self._features(vel, cmd) @ self.coef)
+    feat = self._features(vel, cmd)
+    if self.num_envs is None:
+      return self._out_scale * (feat @ self.coef)
+    return self._out_scale * torch.einsum("b...ip,bp->b...i", feat, self.coef)
 
   def next_velocity(self, vel: torch.Tensor, cmd: torch.Tensor) -> torch.Tensor:
     return self.nominal.next_velocity(vel, cmd) + self.residual(vel, cmd)
@@ -168,24 +194,26 @@ class ResidualModel:
   ) -> torch.Tensor:
     """Take in one plan step of motion: velocity, command, resulting velocity.
 
-    Each is (3,). Returns the nominal model's error on this sample, shape (3,),
-    which is what the residual is fitted to.
+    Each is (3,), or (num_envs, 3) for many robots. Returns the nominal model's
+    error on this sample, same shape, which is what the residual is fitted to.
     """
     error = vel_next - self.nominal.next_velocity(vel, cmd)
-    feat = self._features(vel, cmd).double().cpu()
-    err = (error / self._out_scale).double().cpu()
-    eye = torch.eye(self.num_coef, dtype=torch.float64)
+    dev, f64 = self._device, torch.float64
+    feat = self._features(vel, cmd).to(dev, f64).reshape(-1, 3, self.num_coef)
+    err = (error / self._out_scale).to(dev, f64).reshape(-1, 3, 1)
+    eye = torch.eye(self.num_coef, dtype=f64, device=dev)
 
     # Between samples: leak toward zero, and allow for drift since the last one.
     keep = 1.0 - self.cfg.leak * self.dt
-    coef = keep * self._coef
+    coef = keep * self._coef[..., None]  # (B, P, 1)
     cov = keep**2 * self._cov + self._drift_var * self.dt
 
     # Correct by what the current coefficients failed to predict.
-    innovation_cov = feat @ cov @ feat.T + torch.eye(3, dtype=torch.float64)
-    gain = torch.linalg.solve(innovation_cov, feat @ cov).T
-    self._coef = coef + gain @ (err - feat @ coef)
+    feat_t = feat.transpose(-1, -2)
+    innovation_cov = feat @ cov @ feat_t + torch.eye(3, dtype=f64, device=dev)
+    gain = torch.linalg.solve(innovation_cov, feat @ cov).transpose(-1, -2)
+    self._coef = (coef + gain @ (err - feat @ coef))[..., 0]
     rest = eye - gain @ feat
-    self._cov = rest @ cov @ rest.T + gain @ gain.T
+    self._cov = rest @ cov @ rest.transpose(-1, -2) + gain @ gain.transpose(-1, -2)
     self._publish()
     return error

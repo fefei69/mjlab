@@ -21,6 +21,12 @@ planner correct its model online from how the robot actually moves:
 knee at 30% of its torque:
 
   uv run python -m mppi.demo_circle_race --fault FR_calf_joint --residual command
+
+`--fault-limits` watches every joint for a weak motor and, once one is flagged,
+plans within the trained command range (R3). `--task` and `--checkpoint` race a
+fault-trained policy (see mppi/checkpoints/go1_fault*/README.md).
+
+  uv run python -m mppi.demo_circle_race --fault FR_calf_joint --fault-limits
 """
 
 from __future__ import annotations
@@ -37,15 +43,20 @@ import mediapy as media
 import numpy as np
 import torch
 
+from mjlab.tasks.velocity.mdp.joint_residual import JointModel, JointResidual
 from mjlab.viewer import ViewerConfig
 from mjlab.viewer.debug_visualizer import DebugVisualizer
 from mppi.core import Mppi, MppiCfg
+from mppi.learn_features import LearnedFeatures
 from mppi.planar_model import PlanarModel, body_velocity, wrap_angle
 from mppi.residual_model import FEATURE_SETS, ResidualCfg, ResidualModel
 from mppi.tracker import (
+  CMD_MAX,
   CMD_MAX_FAST,
+  CMD_MIN,
   CMD_MIN_FAST,
   DEFAULT_CHECKPOINT,
+  TASK_ID,
   Tracker,
   make_tracker_cfg,
 )
@@ -157,9 +168,11 @@ def main() -> None:
   )
   p.add_argument(
     "--residual",
-    choices=("off", *FEATURE_SETS),
+    choices=("off", *FEATURE_SETS, "learned"),
     default="off",
-    help="Correct the model online from the robot's motion, with these features.",
+    help="Correct the model online from the robot's motion, with these features."
+    " 'learned' loads planar_features.pt next to the checkpoint"
+    " (mppi/learn_features.py).",
   )
   p.add_argument("--drift-std", type=float, default=ResidualCfg.drift_std)
   p.add_argument("--leak", type=float, default=ResidualCfg.leak)
@@ -169,6 +182,25 @@ def main() -> None:
     default=ResidualCfg.gain_drift_ratio,
     help="How fast gains may change, relative to offsets. 1 treats them alike.",
   )
+  p.add_argument(
+    "--task",
+    default=TASK_ID,
+    help="Task the checkpoint was trained on, which sets what the policy observes.",
+  )
+  p.add_argument(
+    "--fault-limits",
+    action="store_true",
+    help="Watch every joint for a weak motor (mppi/joint_residual.py) and, once"
+    " one is flagged, plan within --safe-cmd-min and --safe-cmd-max from then on.",
+  )
+  p.add_argument(
+    "--joint-model",
+    type=Path,
+    default=None,
+    help="Default: joint_model.pt next to the checkpoint.",
+  )
+  p.add_argument("--safe-cmd-min", type=float, nargs=3, default=CMD_MIN)
+  p.add_argument("--safe-cmd-max", type=float, nargs=3, default=CMD_MAX)
   p.add_argument("--out", type=Path, default=Path("logs/mppi/circle_race.mp4"))
   p.add_argument("--device", default="cuda:0")
   p.add_argument("--seed", type=int, default=0)
@@ -189,9 +221,18 @@ def main() -> None:
   # that is re-fitted during the run.
   residual: ResidualModel | None = None
   if args.residual != "off":
+    if args.residual == "learned":
+      features_path = args.checkpoint.parent / "planar_features.pt"
+      if not features_path.exists():
+        raise SystemExit(
+          f"{features_path} not found. Run `uv run python -m mppi.learn_features`."
+        )
+      features = LearnedFeatures.load(features_path, args.device)
+    else:
+      features = FEATURE_SETS[args.residual]
     residual = ResidualModel(
       model,
-      FEATURE_SETS[args.residual],
+      features,
       ResidualCfg(
         drift_std=args.drift_std,
         leak=args.leak,
@@ -217,7 +258,7 @@ def main() -> None:
   )
 
   # Start on the track, facing along it, and watch from a fixed overhead camera.
-  cfg = make_tracker_cfg(num_envs=1)
+  cfg = make_tracker_cfg(num_envs=1, task_id=args.task)
   robot_cfg = cfg.scene.entities["robot"]
   robot_cfg.init_state.pos = (radius, 0.0, robot_cfg.init_state.pos[2])
   robot_cfg.init_state.rot = (math.cos(math.pi / 4), 0.0, 0.0, math.sin(math.pi / 4))
@@ -232,9 +273,23 @@ def main() -> None:
     height=720,
   )
   tracker = Tracker(
-    cfg, args.device, checkpoint=args.checkpoint, render=not args.no_video
+    cfg,
+    args.device,
+    checkpoint=args.checkpoint,
+    render=not args.no_video,
+    task_id=args.task,
   )
   hold = round(model.dt / tracker.step_dt)
+  watch: JointResidual | None = None
+  if args.fault_limits:
+    joint_path = args.joint_model or args.checkpoint.parent / "joint_model.pt"
+    if not joint_path.exists():
+      raise SystemExit(
+        f"{joint_path} not found. Run `uv run python -m mppi.fit_joint_model`."
+      )
+    watch = JointResidual(JointModel.load(joint_path, args.device), 1, tracker.step_dt)
+  alarm_at: float | None = None
+  alarm_joint = ""
 
   # MPPI stays inside the command range the model was fitted on.
   cmd_min = tuple(args.cmd_min or model.cmd_min or CMD_MIN_FAST)
@@ -337,6 +392,7 @@ def main() -> None:
     "nominal_error": [],
     "correction": [],
     "changed": [],
+    "fault_score": [],
   }
   plan_ms: list[float] = []
   speeds: list[float] = []
@@ -423,9 +479,19 @@ def main() -> None:
       for _ in range(hold):
         if pulling:
           tracker.pull_trunk(pull)
+        data = tracker.robot.data
+        q, qd = data.joint_pos.clone(), data.joint_vel.clone()
         tracker.step(command)
+        if watch is not None:
+          watch.update(q, qd, data.joint_pos_target, data.joint_vel)
         if video is not None:
           video.add_image(hud.draw(tracker.render(), readouts))
+      if watch is not None:
+        log["fault_score"].append(watch.score[0].cpu().numpy())
+        if alarm_at is None and bool(watch.alarm[0]):
+          alarm_at = (k + 1) * model.dt
+          alarm_joint = tracker.robot.joint_names[int(watch.score[0].argmax())]
+          mppi.set_limits(tuple(args.safe_cmd_min), tuple(args.safe_cmd_max))
 
       prev_pose, pose = pose, tracker.pose()[0]
       trail.append(pose[:2].cpu().numpy())
@@ -444,7 +510,7 @@ def main() -> None:
         break
 
   tracker.close()
-  arrays = {name: np.stack(values) for name, values in log.items()}
+  arrays = {name: np.stack(values) for name, values in log.items() if values}
   payload: dict[str, Any] = {"dt": model.dt, **arrays}
   np.savez(args.out.with_suffix(".npz"), **payload)
 
@@ -484,7 +550,18 @@ def main() -> None:
     print(
       f"[race] Fault from {args.change_at:.1f} s on {', '.join(faulted)}: {fault_text}."
     )
+  if watch is not None:
+    if alarm_at is None:
+      print("[race] Fault alarm: none.")
+    else:
+      print(
+        f"[race] Fault alarm at {alarm_at:.1f} s on {alarm_joint}; command limits"
+        f" from then on: {tuple(args.safe_cmd_min)} to {tuple(args.safe_cmd_max)}."
+      )
   if args.pull is not None or args.fault is not None:
+    angle = np.unwrap(np.arctan2(arrays["pose"][:, 1], arrays["pose"][:, 0]))
+    # The robot starts at angle 0.
+    progress = np.diff(angle, prepend=0.0) * radius / model.dt
     error = np.sqrt((arrays["model_error"][:, :2] ** 2).sum(axis=1))
     change = arrays["changed"]
     for name, part in (("Before", ~change), ("After", change)):
@@ -495,7 +572,8 @@ def main() -> None:
         f"[race] {name} the change: {np.abs(off_centre[part]).mean():.2f} m from the"
         f" centre line on average, off the track {100 * (beyond > 0).mean():.0f}%"
         f" of the time and {100 * beyond.mean():.1f} cm beyond its edge on average,"
-        f" model error {np.sqrt((error[part] ** 2).mean()):.2f} m/s."
+        f" model error {np.sqrt((error[part] ** 2).mean()):.2f} m/s, progress"
+        f" {progress[part].mean():.2f} m/s."
       )
   if not args.no_video:
     print(f"[race] Video: {args.out}")

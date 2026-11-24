@@ -413,6 +413,68 @@ Progress is averaged up to the fall where there is one.
 - **Where the planar motion changes a lot, the gait breaks.** A dead thigh motor falls with every model, and the 12-coefficient residual leaves the track 54% of the time.
 - **So the residual's real test needs a policy trained on faults (P1, P2).** A policy that survives a dead motor will walk differently, slower or veering, and that is the change the planner's model has to follow. With the current policy there is no fault that both keeps the robot up and changes its planar motion much.
 
+**Sixth step, 2026-11-24: lower the command limits once a joint is flagged (R3).** The per-joint fault score from entry 5.7 watches the real robot. When any joint crosses its threshold, MPPI's limits drop from the fast range (3 m/s, 1.5 rad/s) to the trained range (2 m/s, 0.7 rad/s) for the rest of the run (`demo_circle_race --fault-limits`). Compared with always fast and always slow, baseline policy, fixed planar model, fault at 8 s, three runs per row (five for the healthy fast and slow rows):
+
+| Fault | Always fast | Always slow | Slow once flagged |
+|---|---|---|---|
+| None | 0 falls, 2.78 m/s | 0 falls, 1.74 m/s | 0 falls, 2.79 m/s, no alarm |
+| Knee at 15% | 2 of 3 fall | 0 of 3, 1.12 m/s after | 0 of 3, 1.06 m/s after |
+| Knee at 20% | 1 of 3 | 0 of 3, 1.11 m/s | 0 of 3, 1.22 m/s |
+| Rear knee at 10% | 3 of 3, off the track 53% | 0 of 3, 1.46 m/s | 0 of 3, 1.47 m/s |
+| Knee dead | 3 of 3 | 1 of 3 | 3 of 3 |
+| Thigh dead | 1 of 3 | 3 of 3 | 2 of 3 |
+
+- **Every fault was flagged 0.2 to 0.5 s after it started, always on the right joint, and no healthy run raised an alarm.**
+- **For a weak motor the rule gets the best of both:** full speed while healthy, and as safe as the slow limits after the fault (no falls in 9 runs, against 6 of 9 when always fast).
+- **For a dead motor no limit helps the baseline policy.** It falls at any speed; that needs a policy trained on faults.
+- **Open:** the rule is one switch. A rule that scales the limits with the score, or that brakes harder right after the alarm, is untested.
+
+**Seventh step, 2026-11-24: features learned offline** (`mppi/learn_features.py`, as in Neural-Fly). 1024 robots, each under one condition for 40 s (20% healthy, 50% one weak motor at 0 to 50% torque, 30% a steady pull of 10 to 40 N in a random direction), random commands in the trained range. A small network F(v, u) with 6 coefficients is trained so that coefficients fitted by ridge regression on 3 s of a robot's data predict its next 3 s. Then the online filter runs over held-out robots, and over robots with the held-out joint (front left knee), and its one-step error is compared, in m/s and rad/s, forward, sideways, yaw:
+
+| Policy, test set | Nominal only | Hand, offset (3) | Hand, 12 coefficients | Learned (6) |
+|---|---|---|---|---|
+| Baseline, held-out robots | 0.114, 0.090, 0.093 | 0.112, 0.071, 0.086 | 0.113, 0.071, 0.086 | 0.102, 0.069, 0.085 |
+| Baseline, held-out joint | 0.104, 0.063, 0.126 | 0.104, 0.064, 0.118 | 0.104, 0.065, 0.117 | 0.098, 0.063, 0.116 |
+| P1, held-out robots | 0.084, 0.079, 0.080 | 0.079, 0.053, 0.071 | 0.080, 0.054, 0.071 | 0.074, 0.052, 0.066 |
+| P1, held-out joint | 0.103, 0.079, 0.211 | 0.100, 0.075, 0.204 | 0.099, 0.075, 0.204 | 0.103, 0.076, 0.218 |
+| P2, held-out robots | 0.082, 0.073, 0.079 | 0.078, 0.050, 0.068 | 0.079, 0.051, 0.068 | 0.072, 0.049, 0.063 |
+| P2, held-out joint | 0.078, 0.059, 0.105 | 0.073, 0.049, 0.100 | 0.072, 0.048, 0.100 | 0.074, 0.051, 0.101 |
+
+- **The learned features are a little better than the hand-chosen ones on conditions like those they were trained on,** forward and yaw by 5 to 10%, for every policy. Most of the remaining error is the gait's own wobble, which no residual removes.
+- **On the held-out joint they are no better,** and for P1 slightly worse in yaw. Six coefficients learned from faults on other joints do not cover the front left knee; the hand-chosen offsets do as well or better. More conditions in training, or more coefficients, may fix that.
+- The baseline rows use commands up to 2 m/s; P1 and P2 rows up to 1 m/s, their trained range (see "Eighth step").
+- **The three hand-chosen sets are equal on this data.** With commands held for 0.2 to 3 s, the extra gains add nothing a one-step fit can use.
+
+**Eighth step, 2026-11-24: first fault-trained policies (preliminary).** P1 (no history), P2 (0.5 s of history) and a third policy that sees the per-joint fault score (entry 5.7), each trained 3,000 iterations on mid-episode motor faults (`mdp.motor_fault`, front left knee held out). Stopped early for time: the command curriculum widens only at 5,000 iterations, so all three are trained up to 1 m/s and 0.5 rad/s.
+
+*Do they cope with a dead motor?* 128 robots each, random commands up to 1 m/s held 3 s, the motor dies at 2 s; share that tip past 60° within the next 8 s:
+
+| Motor | Baseline | P1 | P2 (history) | P1 setup + fault score |
+|---|---|---|---|---|
+| Front right knee dead | 82% | 34% | 16% | 31% |
+| Front right thigh dead | 62% | 5% | 3% | 6% |
+| Front right hip dead | 93% | 72% | 36% | 31% |
+| Front right knee at 20% | 0% | 0% | 0% | 0% |
+
+- **Training on faults works, and history helps on top.** P2 falls half as often as P1 after a dead knee or hip. Whether P2 adapts or is just more robust is for P3 to show.
+- **The fault score helps less than history.** It halves P1's falls after a dead hip but does not help with a dead knee.
+
+*The race.* Circle, fault at 8 s, three runs per cell, every policy with a fixed planar model ("off") or the 12-coefficient residual ("command"). At up to 1 m/s and 0.5 rad/s every policy falls after a dead knee or thigh in nearly every run: the race keeps the robot at the edge of its range, which is harder than training. At a gentler cap (0.6 m/s, 0.3 rad/s):
+
+| Fault | Policy | Falls, fixed / residual | Progress after, fixed / residual | Off the track after | Model error after |
+|---|---|---|---|---|---|
+| Thigh dead | P1 | 0 / 0 of 3 | 0.48 / 0.58 m/s | 22% / 19% | 0.21 / 0.19 m/s |
+| | P2 | 0 / 0 of 3 | 0.76 / 0.75 m/s | 0% / 14% | 0.09 / 0.09 m/s |
+| Knee dead | P1 | 3 / 3 of 3 | | | |
+| | P2 | 3 / 3 of 3 | | | |
+| Held-out knee dead | P1 | 1 / 0 of 3 | 0.10 / -0.06 m/s | 32% / 65% | 0.31 / 0.22 m/s |
+| | P2 | 2 / 1 of 3 | 0.39 / 0.20 m/s | 64% / 45% | 0.19 / 0.09 m/s |
+| None | P1, P2 | 0 / 0 of 3 | 0.64 to 0.68 m/s | | |
+
+- **Where a fault-trained policy survives with a changed gait, the residual cuts the planner's model error,** by half for P2 on the held-out knee (0.19 to 0.09 m/s). This is the case the earlier steps lacked.
+- **It does not yet turn into better racing.** On the held-out knee the robot crawls (0.1 to 0.4 m/s) and leaves the track 30 to 65% of the time with either model. With three runs per cell, none of the differences in falls or progress is reliable.
+- **Next:** train P1 and P2 the full 10,000 iterations, so they reach 2 m/s and cope better; then run the comparison with X1's batched evaluation over many trials instead of three races.
+
 ## 4. Damage injection
 
 Background: MuJoCo Warp calls each parallel environment a "world". Some model fields can differ per world, including geom size and position, site position and PD gains. The collision settings `contype`, `conaffinity` and `condim` cannot.
@@ -453,7 +515,7 @@ The pose reward pulls every joint toward the normal stance, which fights a three
 
 ### 4.6 Implement the chop as a class-based "step" event, not an "interval" event
 
-**Status:** `open` · 2026-11-11
+**Status:** `done for motor faults` · 2026-11-24 (`mdp.motor_fault`)
 
 mjlab events run at startup, on reset, at intervals, or on every step. Interval events re-arm after firing, so a 20 s episode could be chopped twice. A class-based term running every step can pick one chop time per episode in its `reset` hook and keep a "chopped" flag per environment.
 
@@ -559,6 +621,15 @@ Raised by cpw: use the residual idea at both levels, in the planner and in the w
 - **Effect on the comparison in 2.1.** The two factors would become "history, yes or no" and "residual model, yes or no", with the residual feeding both layers. Telling the planner's residual apart from the policy's would need two more controllers. Not decided.
 
 Order agreed with cpw on 2026-11-20: build the planner's residual first, because it needs no training and is already designed. Build the joint-level one second, and treat it as an exploration until the first one works. Agree the joint-level residual's interface with the Policy role early. None of this is tested.
+
+**First version, 2026-11-24** (`src/mjlab/tasks/velocity/mdp/joint_residual.py`, fitted by `mppi/fit_joint_model.py`):
+
+- **Nominal model: a small network, not a linear model per joint.** A linear model of each joint's velocity change from its tracking error and velocity explains only 20 to 50% of it (contacts and the other joints matter). A network over all joints' positions, velocities and tracking errors explains 93 to 98%, on held-out healthy robots.
+- **Signal: a one-sided shortfall, not a fitted gain.** A Kalman filter on a gain and an offset per joint, like the planar residual, flagged healthy joints about 20% of the time: the effective gain swings with the gait. A weak motor differs only when it hits its torque limit, and then the joint moves toward its target less than predicted. The score is that shortfall, in units of the model's usual error, averaged over 0.5 s. Impacts push the error both ways and average out.
+- **Threshold:** set so that 5% of healthy robots cross it within 20 s, under random commands up to 3 m/s.
+- **Detection, baseline policy, 512 faulty robots:** torque below 10% of normal, 100% detected, median 0.54 s, right joint 89%; 10 to 25%, 56% detected, median 0.86 s; 25 to 50%, 31% detected, median 5.2 s. A motor that keeps a quarter of its torque rarely changes how the joint moves, and rarely matters.
+- **As a policy input:** the observation term `joint_fault_score` computes it inside the training environment for every robot, divided by the threshold. The task `Mjlab-Velocity-Flat-Unitree-Go1-Fault-Score` trains a policy that sees it.
+- **Known limit:** the nominal model is fitted to the baseline policy's gait. A policy that walks differently would need its own fit.
 
 ## 6. Demo and setup
 

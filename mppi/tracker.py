@@ -44,15 +44,24 @@ CMD_MAX = (2.0, 1.0, 0.7)
 CMD_MIN_FAST = (-1.5, -1.0, -1.5)
 CMD_MAX_FAST = (3.0, 1.0, 1.5)
 
+MOTOR_FIELDS = ("actuator_forcerange", "actuator_gainprm", "actuator_biasprm")
+
 Policy = Callable[[TensorDict], torch.Tensor]
 Recorder = Callable[["Tracker"], dict[str, torch.Tensor]]
 DrawFn = Callable[[DebugVisualizer], None]
 
 
-def make_tracker_cfg(num_envs: int) -> ManagerBasedRlEnvCfg:
-  """The Go1 flat-terrain play config, set up for externally planned commands."""
-  cfg = load_env_cfg(TASK_ID, play=True)
+def make_tracker_cfg(num_envs: int, task_id: str = TASK_ID) -> ManagerBasedRlEnvCfg:
+  """The Go1 flat-terrain play config, set up for externally planned commands.
+
+  `task_id` picks the policy's task, which sets what the policy observes (the
+  fault-trained policies also have a fault event, switched off here; the demos
+  apply their own faults).
+  """
+  cfg = load_env_cfg(task_id, play=True)
   cfg.scene.num_envs = num_envs
+  if "motor_fault" in cfg.events:
+    cfg.events["motor_fault"].params["fault_prob"] = 0.0
 
   # Commands are written by the planner, so switch off everything that would
   # overwrite them: resampling, heading control, standing and forward-only envs.
@@ -114,14 +123,15 @@ class Tracker:
     policy: Policy | None = None,
     checkpoint: Path = DEFAULT_CHECKPOINT,
     render: bool = False,
+    task_id: str = TASK_ID,
   ) -> None:
     self.env = ManagerBasedRlEnv(
       cfg=cfg, device=device, render_mode="rgb_array" if render else None
     )
-    agent_cfg = load_rl_cfg(TASK_ID)
+    agent_cfg = load_rl_cfg(task_id)
     self._vec_env = RslRlVecEnvWrapper(self.env, clip_actions=agent_cfg.clip_actions)
     if policy is None:
-      runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
+      runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
       runner = runner_cls(self._vec_env, asdict(agent_cfg), device=device)
       runner.load(
         str(checkpoint), load_cfg={"actor": True}, strict=True, map_location=device
@@ -129,6 +139,10 @@ class Tracker:
       policy = runner.get_inference_policy(device=device)
     assert policy is not None
     self.policy: Policy = policy
+
+    # Give every world its own motor parameters, so faults can differ per robot.
+    # Unexpanded fields share one copy: a write to one world changes them all.
+    self.env.sim.expand_model_fields(MOTOR_FIELDS)
 
     self.robot: Entity = self.env.scene["robot"]
     self._trunk = self.robot.find_bodies("trunk")[0]
@@ -237,15 +251,33 @@ class Tracker:
       raise ValueError(f"No joint matches {pattern!r}.")
     return changed
 
+  def set_motor_strength(self, joint: torch.Tensor, strength: torch.Tensor) -> None:
+    """Give each world one weak motor: scale joint `joint[i]`'s torque limit.
+
+    `joint` (num_envs,) indexes `robot.joint_names`; `strength` (num_envs,) is the
+    torque scale, 1 for healthy. Every other joint gets its healthy limit back.
+    """
+    ctrl = torch.full((self.robot.num_joints,), -1, dtype=torch.long)
+    for act in self.robot.actuators:
+      ctrl[act.target_ids.cpu()] = act.global_ctrl_ids.cpu().long()
+    ctrl = ctrl.to(self.device)
+    default = self.env.sim.get_default_field("actuator_forcerange")[ctrl]
+    scale = torch.ones(self.num_envs, len(ctrl), device=self.device)
+    scale[torch.arange(self.num_envs, device=self.device), joint] = strength
+    self.env.sim.model.actuator_forcerange[:, ctrl] = default * scale[..., None]
+
   # Stepping.
 
   def _observe(self, command: torch.Tensor) -> TensorDict:
     self._twist.vel_command_b[:] = command
-    # Force a recompute. mjlab caches the last observation, which predates the new
-    # command and any state copy. The policy has no observation history, so
-    # recomputing has no side effects. A policy with history would also need its
-    # history buffers copied in `set_state`.
-    obs = self.env.observation_manager.compute(update_history=True)
+    # Force a recompute: mjlab caches the last observation, which predates the new
+    # command and any state copy. Dropping the cache and computing without
+    # updating history refreshes every term that has no history (the command
+    # among them) and leaves history buffers as the last step left them. A policy
+    # with history would also need those buffers copied in `set_state`.
+    manager = self.env.observation_manager
+    manager._obs_buffer = None  # noqa: SLF001  (no public way to drop the cache)
+    obs = manager.compute(update_history=False)
     return TensorDict(obs, batch_size=[self.num_envs])
 
   @torch.no_grad()

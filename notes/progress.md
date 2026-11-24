@@ -5,8 +5,8 @@
 | # | Milestone (from [plan.md](plan.md)) | Status | Notes |
 |---|---|---|---|
 | 1 | Baseline: train Go1 velocity tracking | Done | The flat-terrain run from 2026-11-10 tracks velocity commands. It is an undamaged policy without history, so it is a reference point, not row 1 of the experiments table. |
-| 2 | Damage injection | Not started | Design notes are in [ideas.md](ideas.md), section 4. |
-| 3 | Meta-RL policy | Not started | |
+| 2 | Damage injection | Started | Mid-episode motor faults for training (`mdp.motor_fault`, 2026-11-24). No calf cut yet. |
+| 3 | Meta-RL policy | Started | Preliminary P1, P2 and a fault-score policy, 3,000 iterations each (2026-11-24). |
 | 4 | Planner | Started | MPPI, the planar model and its least-squares fit exist and run on the undamaged policy in two demos (2026-11-11). The online residual model exists, is tested on made-up data, and runs in the race loop against a steady pull on the trunk (2026-11-20). Still missing: a safe default for its features, and a path task with damage. |
 | 5 | Evaluation and demo | Not started | |
 
@@ -24,12 +24,24 @@ Still to set: the deadline and checkpoint dates.
 
 ## Log
 
+### 2026-11-24
+
+All action items for the planner side, plus preliminary versions of S2, S4, P1 and P2 so they could be tested. Details in [ideas.md](ideas.md), entry 3.11, "Sixth" to "Eighth step", and entry 5.7. Not committed yet.
+
+- **S2, mid-run motor fault** (`mdp.motor_fault`): one joint per episode, torque scale 0 to 0.5, 80% of episodes, start between 1 and 12 s, undone on reset. The critic sees every joint's torque scale. Preliminary S4 in `FAULT_TRAIN_PARAMS`; the front left knee is held out.
+- **P1, P2 and a fault-score policy**, 3,000 iterations each, in `mppi/checkpoints/go1_fault*/`. Under random commands up to 1 m/s, after a dead knee: baseline 82% fall, P1 34%, P2 16%. They are trained only up to 1 m/s (the curriculum widens at 5,000 iterations).
+- **R5, per-joint fault score** (`mdp.joint_fault_score`, `mppi/fit_joint_model.py`): a motor below 10% torque is flagged in a median 0.54 s, on the right joint 89% of the time, with 5% of healthy robots raising a false alarm in 20 s.
+- **R3, slow down once a joint is flagged** (`demo_circle_race --fault-limits`): full speed when healthy (no false alarms), and after a weak motor as safe as always-slow (0 of 9 falls, against 6 of 9 always-fast). No help with a dead motor on the baseline policy.
+- **R1:** the planar residual runs for many robots at once (`num_envs`), and features can be learned offline (`mppi/learn_features.py`); they are 5 to 10% better than the hand-chosen ones on familiar conditions and no better on the held-out joint.
+- **The residual's test on fault-trained policies:** where the robot survives with a changed gait, the residual halves the model error (P2, held-out knee, 0.19 to 0.09 m/s), but with three races per cell no difference in falls or progress is reliable.
+- **Bug fixed:** the tracker shared motor parameters across robots, so a fault set on one robot changed all of them. Earlier single-robot results are unaffected.
+
 ### 2026-11-23
 
 - **Residual: gains now drift slower than offsets** (`ResidualCfg.gain_drift_ratio`, default 1/3, option `--gain-drift-ratio`). On the 30 N pull test the 12-coefficient residual went from 2 falls in 10 runs to 0, off the track 0% (0 to 2%) during the pull, progress 1.83 m/s. Cost: 11 to 24% of steps over the inside edge before the pull, against 0 to 8%. Details and the full table in [ideas.md](ideas.md), entry 3.11, "Third step".
 - **Residual plot over time** (`mppi/plot_residual.py`, R2): the correction follows the nominal model's error on all three axes after the pull.
 - **First motor faults** (`--fault`, ideas.md entry 3.11, "Fourth step"): faults that change the planar motion also break the gait of the current policy. The 12-coefficient residual cuts the model error by 40 to 60% but most runs still fall.
-- **Same faults inside the trained command range** ("Fifth step"): with the knee at 20% no run falls, so speed caused most falls. Where the robot survives, the fault barely changes the planar motion, so the residual has little to fix. Its real test needs a policy trained on faults (P1, P2). Not committed yet.
+- **Same faults inside the trained command range** ("Fifth step"): with the knee at 20% no run falls, so speed caused most falls. Where the robot survives, the fault barely changes the planar motion, so the residual has little to fix. Its real test needs a policy trained on faults (P1, P2).
 
 ### 2026-11-21
 

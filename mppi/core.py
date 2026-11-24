@@ -46,6 +46,12 @@ class Mppi:
     self._sigma = torch.tensor(cfg.noise_sigma, device=self.device)
     self.mean = torch.zeros(cfg.horizon, len(cfg.u_min), device=self.device)
 
+  def set_limits(self, u_min: tuple[float, ...], u_max: tuple[float, ...]) -> None:
+    """Change the command limits mid-run. The plan is pulled inside them."""
+    self._u_min = torch.tensor(u_min, device=self.device)
+    self._u_max = torch.tensor(u_max, device=self.device)
+    self.mean = self.clamp(self.mean)
+
   def clamp(self, commands: torch.Tensor) -> torch.Tensor:
     return torch.clamp(commands, self._u_min, self._u_max)
 

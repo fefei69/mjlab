@@ -135,3 +135,25 @@ def test_steady_push_goes_to_the_offsets(nominal: PlanarModel) -> None:
     errors.append(((model.residual(slower, slower) - truth) / std).abs().max())
   # Gains as fast as offsets give about 0.9 here, and 0.4 with the default.
   assert torch.stack(errors).mean() < 0.6
+
+
+def test_many_robots_match_one_robot_each(nominal: PlanarModel) -> None:
+  """The batched filter gives each robot what its own filter would."""
+  gen = torch.Generator().manual_seed(0)
+  robots, steps = 3, 40
+  vel = torch.randn(steps + 1, robots, 3, generator=gen)
+  cmd = torch.randn(steps, robots, 3, generator=gen)
+  batched = ResidualModel(nominal, command_features, num_envs=robots)
+  singles = [ResidualModel(nominal, command_features) for _ in range(robots)]
+  for t in range(steps):
+    batched.update(vel[t], cmd[t], vel[t + 1])
+    for i, single in enumerate(singles):
+      single.update(vel[t, i], cmd[t, i], vel[t + 1, i])
+  for i, single in enumerate(singles):
+    torch.testing.assert_close(batched.coef[i], single.coef)
+    torch.testing.assert_close(
+      batched.residual(vel[-1], cmd[-1])[i], single.residual(vel[-1, i], cmd[-1, i])
+    )
+  batched.reset(torch.tensor([1]))
+  assert batched.coef[1].abs().max() == 0
+  assert batched.coef[0].abs().max() > 0

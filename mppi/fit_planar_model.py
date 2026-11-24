@@ -22,6 +22,7 @@ from mppi.tracker import (
   CMD_MAX_FAST,
   CMD_MIN_FAST,
   DEFAULT_CHECKPOINT,
+  TASK_ID,
   Tracker,
   make_tracker_cfg,
 )
@@ -97,6 +98,7 @@ def multi_step_error(
 def main() -> None:
   p = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
   p.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+  p.add_argument("--task", default=TASK_ID, help="Task the checkpoint was trained on.")
   p.add_argument("--num-envs", type=int, default=512)
   p.add_argument("--duration", type=float, default=60.0, help="Seconds per env.")
   p.add_argument("--plan-dt", type=float, default=0.1, help="Model step in seconds.")
@@ -119,7 +121,10 @@ def main() -> None:
   hi = torch.tensor(cmd_max, device=args.device)
 
   tracker = Tracker(
-    make_tracker_cfg(args.num_envs), args.device, checkpoint=args.checkpoint
+    make_tracker_cfg(args.num_envs, args.task),
+    args.device,
+    checkpoint=args.checkpoint,
+    task_id=args.task,
   )
   hold = round(args.plan_dt / tracker.step_dt)
   windows = round(args.duration / args.plan_dt)

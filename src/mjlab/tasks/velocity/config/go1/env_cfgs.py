@@ -1,6 +1,8 @@
 """Unitree Go1 velocity environment configurations."""
 
 import math
+from dataclasses import replace
+from pathlib import Path
 from typing import Literal
 
 from mjlab.asset_zoo.robots import (
@@ -12,6 +14,7 @@ from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import TerminationTermCfg
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import (
@@ -308,4 +311,56 @@ def unitree_go1_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     twist_cmd.ranges.lin_vel_x = (-1.5, 2.0)
     twist_cmd.ranges.ang_vel_z = (-0.7, 0.7)
 
+  return cfg
+
+
+# Motor faults the fault-trained policies see in training (item S4 in
+# notes/tasks.md). One joint per episode fails at a random time, from weak to
+# dead. The front left knee never fails in training: it is held out for testing,
+# together with faults on several joints at once (a whole leg off).
+FAULT_HELD_OUT_JOINT = "FL_calf_joint"
+FAULT_TRAIN_PARAMS = {
+  "joint_names": rf"(?!{FAULT_HELD_OUT_JOINT}).*_joint",
+  "fault_prob": 0.8,
+  "strength_range": (0.0, 0.5),
+  "onset_s": (1.0, 12.0),
+}
+# Actor history for the policy with memory: 25 policy steps, 0.5 s.
+FAULT_HISTORY_LENGTH = 25
+# The per-joint fault score's model, fitted to the baseline policy. It lives with
+# the planner's checkpoints, at the root of this repository.
+JOINT_MODEL_PATH = (
+  Path(__file__).parents[6] / "mppi/checkpoints/go1_flat_baseline/joint_model.pt"
+)
+
+
+def unitree_go1_flat_fault_env_cfg(
+  play: bool = False, history_length: int = 0, fault_score: bool = False
+) -> ManagerBasedRlEnvCfg:
+  """Go1 on flat terrain with a mid-episode motor fault.
+
+  The critic sees every joint's torque scale; the actor does not. With
+  `history_length` > 0 the actor sees that many past steps of every observation
+  except the command. With `fault_score` the actor also sees every joint's fault
+  score from `mdp.joint_fault_score`, which does not know the true fault.
+  """
+  cfg = unitree_go1_flat_env_cfg(play=play)
+  cfg.events["motor_fault"] = EventTermCfg(
+    func=mdp.motor_fault, mode="step", params=dict(FAULT_TRAIN_PARAMS)
+  )
+  cfg.observations["critic"].terms["motor_strength"] = ObservationTermCfg(
+    func=mdp.motor_strength
+  )
+  if fault_score:
+    cfg.observations["actor"].terms["fault_score"] = ObservationTermCfg(
+      func=mdp.joint_fault_score,
+      params={"model_path": str(JOINT_MODEL_PATH)},
+      clip=(-3.0, 3.0),
+    )
+  if history_length > 0:
+    # Copies, because the critic shares these term objects with the actor.
+    actor = cfg.observations["actor"].terms
+    for name, term in actor.items():
+      if name != "command":
+        actor[name] = replace(term, history_length=history_length)
   return cfg

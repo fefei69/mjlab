@@ -111,7 +111,7 @@ Difficulty is Easy, Medium or Hard. Size is S (a day or two), M (three to five d
 | P3 | Show that the history policy really adapts | Medium | M | PyTorch, plotting, analysing a trained network | Yes | P2 | |
 | P4 | Train on wider command ranges (optional) | Easy to Medium | S to M | PPO training setup | Yes | Nothing | |
 | R1 | Online residual model | Medium | M | Linear algebra (least squares), PyTorch, pytest | No | Nothing | cpw (first step built) |
-| R2 | Put the residual into the planner loop | Medium | M | Python, MPPI basics, plotting | Yes | R1 | cpw (first version runs) |
+| R2 | Put the residual into the planner loop | Medium | M | Python, MPPI basics, plotting | Yes | R1 | cpw (done) |
 | R3 | Command limits after a change | Hard, open question | M to L | Control intuition, designing experiments | Yes | R2 | |
 | R4 | Oracle planner (optional) | Medium | M | Simulator state handling, GPU tensors | Yes | S2, T1 | |
 | R5 | Residual model for the walking policy (exploratory) | Hard | L | Linear algebra, mjlab observations, some RL | Yes | R1 | cpw |
@@ -165,6 +165,7 @@ A piece of the environment that applies a change at a random time in each episod
 - **Do:** write it as an mjlab event, which is a function the environment calls every step. Start with motor faults. Keep the change's parameters (which leg, which joint, how severe, whether it has happened yet) in a tensor that other code can read.
 - **Done when:** a training run starts with it, a video shows the change happening mid-episode, and the parameters can be logged and fed to the critic.
 - **Watch out for:** [ideas.md](ideas.md) entries 4.2, 4.6 and 4.7. In short, write it as a class with a `reset` hook, pick one change time per episode, and avoid changing body mass because that is slow.
+- **Status on 2026-11-24 (preliminary, built by cpw):** `mdp.motor_fault` in `src/mjlab/tasks/velocity/mdp/motor_fault.py`, a class-based step event. Each episode draws whether a fault happens (80%), which joint, its torque scale and its start time, and undoes it on reset. `strength` holds every joint's torque scale for the critic (`mdp.motor_strength`). Tested in `tests/test_motor_fault.py`. Not yet shown in a video, and only motor faults (no whole leg).
 
 ### S3. Build the calf cut (stretch)
 
@@ -183,6 +184,7 @@ What the policies are trained on and tested on, written down once so that everyo
 - **Ordinary randomization:** the Go1 task already randomizes foot friction, joint-encoder offsets and the trunk's centre of mass, and pushes the robot at random times. The current policy was trained with these on. Decide whether they stay on in training, and whether the evaluation runs with them on. The demos switch them off, so that the planner's simulated copies match the robot exactly.
 - **Done when:** one place in the code defines the training set and the held-out set, and both the training (P1, P2) and the evaluation script (X1) read it.
 - **Who it is for:** Policy and Evaluation both depend on it, so agree it with them.
+- **Status on 2026-11-24 (preliminary, not agreed):** `FAULT_TRAIN_PARAMS` in `src/mjlab/tasks/velocity/config/go1/env_cfgs.py`: one joint per episode, torque scale 0 to 0.5, 80% of episodes, start between 1 and 12 s. Held out: the front left knee (`FAULT_HELD_OUT_JOINT`) and faults on several joints at once. The ordinary randomization stays on. Change it there if the Robot changes role decides otherwise.
 
 ### T1. Path task with turns in both directions
 
@@ -198,6 +200,7 @@ This is the policy for controllers 1 and 3.
 - **Do:** train the existing policy setup with S2 switched on. Tell the critic the change's true parameters, but not the actor.
 - **Done when:** there is a checkpoint, training curves, and a video of the policy coping with a change.
 - **Watch out for:** rewards that punish the adapted gait. See [ideas.md](ideas.md) entries 4.4 and 4.5.
+- **Status on 2026-11-24 (preliminary):** task `Mjlab-Velocity-Flat-Unitree-Go1-Fault`, trained for 3,000 iterations (stopped early for time), checkpoint in `mppi/checkpoints/go1_fault/`. The command curriculum only widens at 5,000 iterations, so it is trained up to 1 m/s and 0.5 rad/s; at 2 m/s it falls with a dead motor. Train the full 10,000 for the final results.
 
 ### P2. Train the policy with history
 
@@ -207,6 +210,7 @@ This is the policy for controllers 2 and 4, and half of what the project claims.
 - **Done when:** there is a checkpoint trained with the same budget as P1, and a first comparison against P1 on tracking after a change.
 - **Optional:** a recurrent policy (GRU) as a second variant. mjlab's configuration already supports it.
 - **Background:** [ideas.md](ideas.md) entry 5.6 explains why history is needed and what else is needed with it.
+- **Status on 2026-11-24 (preliminary):** task `Mjlab-Velocity-Flat-Unitree-Go1-Fault-History`, the P1 setup with 25 steps (0.5 s) of history on every actor input except the command. Same 3,000 iterations, checkpoint in `mppi/checkpoints/go1_fault_history/`. A third task, `...-Fault-Score`, gives the P1 actor R5's fault score instead (`mppi/checkpoints/go1_fault_score/`).
 
 ### P3. Show that the history policy really adapts
 
@@ -231,6 +235,7 @@ The planner's own adaptation. This item is pure math and code, with no simulator
 - **Start from:** `PlanarModel` in `mppi/planar_model.py` and the design in [ideas.md](ideas.md) entry 3.11.
 - **Status on 2026-11-20:** the first step is built, following Neural-Fly, with hand-chosen features (`mppi/residual_model.py`, `mppi/residual_check.py`, tests in `mppi/tests/`). The tests pass. Of the three conditions, two hold and one holds in part: a change is recovered in about two seconds, not one. Results are in [ideas.md](ideas.md) entry 3.11. Still to do in this item: features learned offline, once there is data from real changes.
 - **Status on 2026-11-23:** gains now drift at a third of the offsets' rate (`ResidualCfg.gain_drift_ratio`). This fixes the falls in R2, but a change in gain is now recovered more slowly than before, so the "about a second" condition is further off for gains. Offsets are unaffected.
+- **Status on 2026-11-24:** batched over robots (`ResidualModel(..., num_envs=N)`, tested against one filter per robot), for X1. Features learned offline (`mppi/learn_features.py`, Neural-Fly style) are about 9% better than the hand-chosen ones forward, on held-out robots ([ideas.md](ideas.md) entry 3.11, "Seventh step").
 
 ### R2. Put the residual into the planner loop
 
@@ -239,6 +244,7 @@ The planner's own adaptation. This item is pure math and code, with no simulator
 - **Start from:** the loop in `mppi/demo_circle_race.py`. It already measures the two things the fit needs at every step: the command sent and the velocity that resulted.
 - **Status on 2026-11-20:** a first version runs. `--residual` in the race demo plans with the corrected model and `--pull` applies a steady force to the trunk. Under a 30 N sideways pull the fixed model leaves the track 90% of the time and the corrected one 0 to 4%, over ten runs each. The 12-coefficient features made the robot fall in 2 of 10 runs. The plot of the residual over time is not made yet. Results are in [ideas.md](ideas.md) entry 3.11, "Second step".
 - **Status on 2026-11-23:** with slower gains the 12-coefficient features no longer fall (0 of 10 runs) and stay on the track 98 to 100% of the time during the pull ([ideas.md](ideas.md) entry 3.11, "Third step"). Still missing for "done": the plot of the residual over time, a path-error comparison (so far only time off the track is measured), and a test on motor faults.
+- **Status on 2026-11-24:** done. `mppi/plot_residual.py` plots the residual against the nominal model's error over time, the race demo prints the distance from the centre line before and after the change, and `--fault` weakens a joint's motor. On the current policy, faults either barely change the planar motion or break the gait, so the residual's real test waits for P1 and P2 ([ideas.md](ideas.md) entry 3.11, "Fifth step").
 
 ### R3. Command limits after a change
 
@@ -247,6 +253,7 @@ An open question, more research than engineering.
 - **The problem:** MPPI is allowed to command up to 3.0 m/s. A robot with a dead motor may fall at that speed. A lower gain in the residual tells MPPI the robot is slower, but not that a command has become unsafe ([ideas.md](ideas.md) entry 3.9).
 - **Do:** find a rule that shrinks MPPI's command limits after a change, and test whether it prevents falls without costing much speed.
 - **Done when:** there is a rule, and numbers for falls and lap time with and without it.
+- **Status on 2026-11-24:** a first rule: once R5's fault score flags a joint, MPPI plans within the trained range (`demo_circle_race --fault-limits`). On the baseline policy it keeps full speed when healthy (no false alarms) and, after a weak motor, is as safe as always-slow (0 of 9 falls against 6 of 9 always-fast). It does not help with a dead motor. Details in [ideas.md](ideas.md) entry 3.11, "Sixth step".
 
 ### R4. Oracle planner (optional)
 
@@ -263,6 +270,7 @@ The same idea one level down: give the walking policy an online estimate of how 
 - **Do:** fit a nominal model of how each joint follows its target on the healthy robot, estimate that model's residual online, and make it available as an observation that a policy can be trained on.
 - **Done when:** the residual separates a healthy joint from a faulty one within a fraction of a second, and it can be switched on as an observation in training.
 - **Affects the Policy role:** it would add a third policy to train, one that sees the residual. Agree the interface with them early.
+- **Status on 2026-11-24:** built (`src/mjlab/tasks/velocity/mdp/joint_residual.py`, fitted by `mppi/fit_joint_model.py`). A motor below 10% torque is flagged in a median 0.54 s, on the right joint 89% of the time, with 5% of healthy robots raising a false alarm in 20 s. It is an observation term for training (`mdp.joint_fault_score`), and a policy has been trained with it. Details in [ideas.md](ideas.md) entry 5.7.
 
 ### X1. Evaluation script
 
