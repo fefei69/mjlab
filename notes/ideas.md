@@ -372,6 +372,47 @@ Open after this step:
 - On made-up data (`residual_check`), gain-type changes are learned more slowly with varied commands: the share of the error removed after two seconds drops from 75% to 62% for "weak" and from 74% to 64% for "veer". Two unit tests were loosened for this, and one was added (`test_steady_push_goes_to_the_offsets`).
 - Proposed default: 12 coefficients with slow gains, to be confirmed on motor faults, where gain changes are expected.
 
+**Fourth step, 2026-11-23: first motor faults.** `--fault JOINTS --fault-torque X --fault-gain Y` scales one or more motors' torque limit and PD gains from `--change-at` (8 s) on, through `Tracker.weaken_joints`. Fixed model, single runs: the front right knee at 30% torque, or the whole front right leg at 30%, changes almost nothing (model error 0.17 to 0.19 m/s). The knee at 10% falls within 1.2 s. Then three runs per row, front right leg:
+
+| Fault | Planner's model | Falls | Progress after the fault | Off the track after | Model error after |
+|---|---|---|---|---|---|
+| Thigh motor dead (torque and gains 0) | Fixed | 2 of 3 (at 9.3, 9.4 s) | 1.28 m/s | 0% | 0.66 m/s |
+| | Offset (3) | 2 of 3 (9.0, 9.7 s) | 0.40 m/s | 23% | 0.37 m/s |
+| | 12 coefficients | 2 of 3 (14.8, 25.3 s) | 0.15 m/s | 2% | 0.28 m/s |
+| Knee at 15% torque | Fixed | 1 of 3 (9.0 s) | 0.60 m/s | 1% | 0.51 m/s |
+| | Offset (3) | 3 of 3 (8.9 to 10.3 s) | 1.53 m/s | 21% | 0.33 m/s |
+| | 12 coefficients | 3 of 3 (9.9 to 19.2 s) | 0.65 m/s | 0% | 0.31 m/s |
+| Knee at 20% torque | Fixed | 2 of 3 (15.0, 15.3 s) | 1.70 m/s | 3% | 0.33 m/s |
+| | Offset (3) | 2 of 3 (11.0, 13.3 s) | 1.64 m/s | 26% | 0.28 m/s |
+| | 12 coefficients | 3 of 3 (14.3 to 24.3 s) | 1.92 m/s | 5% | 0.20 m/s |
+
+Progress is averaged up to the fall where there is one.
+
+- **The residual makes the model less wrong, but does not stop falls.** Model error drops by 40 to 60% with the 12 coefficients, and falls sometimes come later, but most runs fall with every model. With this policy the faults that change the planar motion are the ones that break the gait, and no velocity plan repairs a gait.
+- **The offset alone is worse than the fixed model here:** off the track 21 to 26% of the time after the fault. A fault is not a steady push.
+- **A confound:** MPPI may command up to 3 m/s, above the 2 m/s the policy was trained on. Falls may come from fast commands on a weak leg rather than from the fault alone. Running inside the trained range (`--cmd-max 2 1 0.7`) would separate the two, and is the question of R3 (command limits after a change).
+- Three runs per row is a first look, not evidence.
+
+**Fifth step, 2026-11-23: the same faults inside the trained command range** (`--cmd-min -1.5 -1 -0.7 --cmd-max 2 1 0.7`, so at most 2 m/s and 0.7 rad/s; on this circle that caps the speed along the track at about 1.75 m/s). Three runs per row:
+
+| Fault | Planner's model | Falls | Progress after the fault | Off the track after | Model error after |
+|---|---|---|---|---|---|
+| None (healthy) | Fixed | 0 of 3 | 1.74 m/s | 1% | 0.23 m/s |
+| Thigh motor dead | Fixed | 3 of 3 | 0.80 m/s | 9% | 0.48 m/s |
+| | Offset (3) | 3 of 3 | 1.08 m/s | 14% | 0.37 m/s |
+| | 12 coefficients | 2 of 3 | 0.31 m/s | 54% | 0.26 m/s |
+| Knee at 15% torque | Fixed | 1 of 3 | 0.76 m/s | 7% | 0.30 m/s |
+| | Offset (3) | 1 of 3 | 0.95 m/s | 5% | 0.24 m/s |
+| | 12 coefficients | 1 of 3 | 0.79 m/s | 1% | 0.22 m/s |
+| Knee at 20% torque | Fixed | 0 of 3 | 1.16 m/s | 1% | 0.22 m/s |
+| | Offset (3) | 0 of 3 | 1.04 m/s | 2% | 0.27 m/s |
+| | 12 coefficients | 0 of 3 | 1.16 m/s | 0% | 0.16 m/s |
+
+- **Speed caused most of the falls in the fourth step.** With the knee at 20%, every run now survives, against 7 of 9 falling at up to 3 m/s. So command limits after a change (R3) matter.
+- **Where the robot survives, the fault hardly changes its planar motion.** With the knee at 20% the fixed model's error is 0.22 m/s, the same as on the healthy robot (0.23 m/s). The robot is slower because MPPI asks for less, not because the model is wrong, so the residual has little to fix: same progress, off the track 0% against 1%.
+- **Where the planar motion changes a lot, the gait breaks.** A dead thigh motor falls with every model, and the 12-coefficient residual leaves the track 54% of the time.
+- **So the residual's real test needs a policy trained on faults (P1, P2).** A policy that survives a dead motor will walk differently, slower or veering, and that is the change the planner's model has to follow. With the current policy there is no fault that both keeps the robot up and changes its planar motion much.
+
 ## 4. Damage injection
 
 Background: MuJoCo Warp calls each parallel environment a "world". Some model fields can differ per world, including geom size and position, site position and PD gains. The collision settings `contype`, `conaffinity` and `condim` cannot.

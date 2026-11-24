@@ -26,7 +26,10 @@ Still to set: the deadline and checkpoint dates.
 
 ### 2026-11-23
 
-- **Residual: gains now drift slower than offsets** (`ResidualCfg.gain_drift_ratio`, default 1/3, option `--gain-drift-ratio`). On the 30 N pull test the 12-coefficient residual went from 2 falls in 10 runs to 0, off the track 0% (0 to 2%) during the pull, progress 1.83 m/s. Cost: 11 to 24% of steps over the inside edge before the pull, against 0 to 8%. Details and the full table in [ideas.md](ideas.md), entry 3.11, "Third step". Not committed yet.
+- **Residual: gains now drift slower than offsets** (`ResidualCfg.gain_drift_ratio`, default 1/3, option `--gain-drift-ratio`). On the 30 N pull test the 12-coefficient residual went from 2 falls in 10 runs to 0, off the track 0% (0 to 2%) during the pull, progress 1.83 m/s. Cost: 11 to 24% of steps over the inside edge before the pull, against 0 to 8%. Details and the full table in [ideas.md](ideas.md), entry 3.11, "Third step".
+- **Residual plot over time** (`mppi/plot_residual.py`, R2): the correction follows the nominal model's error on all three axes after the pull.
+- **First motor faults** (`--fault`, ideas.md entry 3.11, "Fourth step"): faults that change the planar motion also break the gait of the current policy. The 12-coefficient residual cuts the model error by 40 to 60% but most runs still fall.
+- **Same faults inside the trained command range** ("Fifth step"): with the knee at 20% no run falls, so speed caused most falls. Where the robot survives, the fault barely changes the planar motion, so the residual has little to fix. Its real test needs a policy trained on faults (P1, P2). Not committed yet.
 
 ### 2026-11-21
 

@@ -23,9 +23,9 @@ What exists today, on the branch `dev`:
 | MPPI planner (`mppi/core.py`) | Built and working |
 | Planar motion model, fitted offline by least squares (`mppi/planar_model.py`) | Built and working |
 | Two demos: race around a circle, push a box through goals | Working, with videos |
-| Anything that changes the robot mid-run | Not built |
+| Anything that changes the robot mid-run | Only a steady pull on the trunk, for testing the planner (`--pull` in the race demo). Motor faults not built. |
 | Policy with history | Not built |
-| Planner that re-fits its model online | Not built, design in [ideas.md](ideas.md) entry 3.11 |
+| Planner that re-fits its model online | Built and tested against a pull (`mppi/residual_model.py`, `--residual`), not yet on motor faults. See [ideas.md](ideas.md) entry 3.11. |
 
 Results and the commands to reproduce them are in [progress.md](progress.md). The original plan is in [plan.md](plan.md).
 
@@ -230,6 +230,7 @@ The planner's own adaptation. This item is pure math and code, with no simulator
 - **Done when:** tests on made-up data pass. A sudden change in gain or offset is recovered within about a second of samples, no change leaves the residual near zero, and constant commands do not make it blow up.
 - **Start from:** `PlanarModel` in `mppi/planar_model.py` and the design in [ideas.md](ideas.md) entry 3.11.
 - **Status on 2026-11-20:** the first step is built, following Neural-Fly, with hand-chosen features (`mppi/residual_model.py`, `mppi/residual_check.py`, tests in `mppi/tests/`). The tests pass. Of the three conditions, two hold and one holds in part: a change is recovered in about two seconds, not one. Results are in [ideas.md](ideas.md) entry 3.11. Still to do in this item: features learned offline, once there is data from real changes.
+- **Status on 2026-11-23:** gains now drift at a third of the offsets' rate (`ResidualCfg.gain_drift_ratio`). This fixes the falls in R2, but a change in gain is now recovered more slowly than before, so the "about a second" condition is further off for gains. Offsets are unaffected.
 
 ### R2. Put the residual into the planner loop
 
@@ -237,6 +238,7 @@ The planner's own adaptation. This item is pure math and code, with no simulator
 - **Done when:** a plot shows the residual jumping when a change is applied, and a comparison shows path error with the fixed model against the residual model.
 - **Start from:** the loop in `mppi/demo_circle_race.py`. It already measures the two things the fit needs at every step: the command sent and the velocity that resulted.
 - **Status on 2026-11-20:** a first version runs. `--residual` in the race demo plans with the corrected model and `--pull` applies a steady force to the trunk. Under a 30 N sideways pull the fixed model leaves the track 90% of the time and the corrected one 0 to 4%, over ten runs each. The 12-coefficient features made the robot fall in 2 of 10 runs. The plot of the residual over time is not made yet. Results are in [ideas.md](ideas.md) entry 3.11, "Second step".
+- **Status on 2026-11-23:** with slower gains the 12-coefficient features no longer fall (0 of 10 runs) and stay on the track 98 to 100% of the time during the pull ([ideas.md](ideas.md) entry 3.11, "Third step"). Still missing for "done": the plot of the residual over time, a path-error comparison (so far only time off the track is measured), and a test on motor faults.
 
 ### R3. Command limits after a change
 

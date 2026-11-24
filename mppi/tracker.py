@@ -9,6 +9,7 @@ and rolls candidate command sequences forward there.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -209,6 +210,32 @@ class Tracker:
     self.robot.write_external_wrench_to_sim(
       world[:, None], torch.zeros_like(world[:, None]), body_ids=self._trunk
     )
+
+  def weaken_joints(self, pattern: str, torque: float, gain: float = 1.0) -> list[str]:
+    """Simulate a motor fault: scale the joints' torque limit and PD gains.
+
+    `pattern` is a regular expression on joint names, such as "FR_calf_joint" or
+    "FR_.*" for a whole leg. `torque` and `gain` scale the healthy values, so 1
+    is healthy and 0 is a dead motor. Applies to every world, and lasts until it
+    is called again with 1. Returns the joints it changed.
+    """
+    model = self.env.sim.model
+    default_force = self.env.sim.get_default_field("actuator_forcerange")
+    default_gain = self.env.sim.get_default_field("actuator_gainprm")
+    default_bias = self.env.sim.get_default_field("actuator_biasprm")
+    changed = []
+    for act in self.robot.actuators:
+      for i, name in enumerate(act.target_names):
+        if re.fullmatch(pattern, name) is None:
+          continue
+        ctrl = act.global_ctrl_ids[i]
+        model.actuator_forcerange[:, ctrl] = default_force[ctrl] * torque
+        model.actuator_gainprm[:, ctrl, 0] = default_gain[ctrl, 0] * gain
+        model.actuator_biasprm[:, ctrl, 1:3] = default_bias[ctrl, 1:3] * gain
+        changed.append(name)
+    if not changed:
+      raise ValueError(f"No joint matches {pattern!r}.")
+    return changed
 
   # Stepping.
 

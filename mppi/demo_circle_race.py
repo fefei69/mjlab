@@ -16,6 +16,11 @@ planner correct its model online from how the robot actually moves:
 
   uv run python -m mppi.demo_circle_race --pull 0 -30                    # Fixed model.
   uv run python -m mppi.demo_circle_race --pull 0 -30 --residual command
+
+`--fault` weakens one or more motors mid-run instead, for example the front right
+knee at 30% of its torque:
+
+  uv run python -m mppi.demo_circle_race --fault FR_calf_joint --residual command
 """
 
 from __future__ import annotations
@@ -133,7 +138,23 @@ def main() -> None:
     metavar=("FORWARD", "LEFT"),
     help="Steady force on the trunk in N, forward and to the left of the robot.",
   )
-  p.add_argument("--pull-at", type=float, default=8.0, help="When the pull starts.")
+  p.add_argument(
+    "--fault",
+    default=None,
+    metavar="JOINTS",
+    help="Weaken these motors, a regular expression on joint names.",
+  )
+  p.add_argument(
+    "--fault-torque", type=float, default=0.3, help="Torque limit left, 0 to 1."
+  )
+  p.add_argument("--fault-gain", type=float, default=1.0, help="PD gains left, 0 to 1.")
+  p.add_argument(
+    "--change-at",
+    "--pull-at",
+    type=float,
+    default=8.0,
+    help="When the pull or the fault starts, in s.",
+  )
   p.add_argument(
     "--residual",
     choices=("off", *FEATURE_SETS),
@@ -180,6 +201,12 @@ def main() -> None:
   plan_model: PlanarModel | ResidualModel = residual or model
   pull = torch.tensor(args.pull or (0.0, 0.0), device=args.device)
   pulling = False
+  faulted: list[str] = []
+  fault_text = (
+    f"{args.fault}: torque {args.fault_torque:.0%}, gains {args.fault_gain:.0%}"
+    if args.fault
+    else ""
+  )
   pull_text = ", ".join(
     f"{abs(size):.0f} N {positive if size > 0 else negative}"
     for size, positive, negative in (
@@ -307,7 +334,9 @@ def main() -> None:
     "cmd": [],
     "vel": [],
     "model_error": [],
-    "pulling": [],
+    "nominal_error": [],
+    "correction": [],
+    "changed": [],
   }
   plan_ms: list[float] = []
   speeds: list[float] = []
@@ -327,14 +356,26 @@ def main() -> None:
       prev_vel, vel = vel, body_velocity(prev_pose, pose, model.dt)
       # How wrong the planner's model was about the step just taken. Taken
       # before the residual sees that step, so it is a true prediction error.
+      # The nominal model's error is what the residual is fitted to, and the
+      # correction is the residual's prediction of it.
       model_error = torch.zeros_like(vel)
+      nominal_error = torch.zeros_like(vel)
+      correction = torch.zeros_like(vel)
       if k > 0:
         model_error = vel - plan_model.next_velocity(prev_vel, command)
+        nominal_error = vel - model.next_velocity(prev_vel, command)
         if residual is not None:
+          correction = residual.residual(prev_vel, command)
           residual.update(prev_vel, command, vel)
       log["model_error"].append(model_error.cpu().numpy())
-      pulling = args.pull is not None and k * model.dt >= args.pull_at
-      log["pulling"].append(np.array(pulling))
+      log["nominal_error"].append(nominal_error.cpu().numpy())
+      log["correction"].append(correction.cpu().numpy())
+      changed = k * model.dt >= args.change_at
+      pulling = args.pull is not None and changed
+      if args.fault is not None and changed and not faulted:
+        faulted = tracker.weaken_joints(args.fault, args.fault_torque, args.fault_gain)
+      has_change = args.pull is not None or args.fault is not None
+      log["changed"].append(np.array(changed and has_change))
 
       torch.cuda.synchronize()
       t0 = time.perf_counter()
@@ -366,9 +407,11 @@ def main() -> None:
           f"vx {command[0]:+.2f}  vy {command[1]:+.2f}  wz {command[2]:+.2f}",
         ),
       ]
-      if args.pull is not None or residual is not None:
+      if args.pull is not None or args.fault is not None or residual is not None:
         if args.pull is not None:
           readouts.append(("Pull", pull_text if pulling else "none yet"))
+        if args.fault is not None:
+          readouts.append(("Fault", fault_text if faulted else "none yet"))
         # Both averaged over 1 s. The model error covers forward and sideways.
         recent = np.stack(log["model_error"][-10:])[:, :2]
         off = [float(np.hypot(*p[:2])) - radius for p in log["pose"][-10:]]
@@ -437,16 +480,22 @@ def main() -> None:
     f"[race] Planning time: median {np.median(plan_ms):.1f} ms per plan"
     f" ({args.samples} samples, {args.iterations} iterations), budget {1e3 * model.dt:.0f} ms."
   )
-  if args.pull is not None:
+  if args.fault is not None:
+    print(
+      f"[race] Fault from {args.change_at:.1f} s on {', '.join(faulted)}: {fault_text}."
+    )
+  if args.pull is not None or args.fault is not None:
     error = np.sqrt((arrays["model_error"][:, :2] ** 2).sum(axis=1))
-    for name, part in (("Before", ~arrays["pulling"]), ("During", arrays["pulling"])):
+    change = arrays["changed"]
+    for name, part in (("Before", ~change), ("After", change)):
       if not part.any():
         continue
-      outside = np.abs(off_centre[part]) > half_width
+      beyond = np.maximum(np.abs(off_centre[part]) - half_width, 0.0)
       print(
-        f"[race] {name} the pull: {np.abs(off_centre[part]).mean():.2f} m from the"
-        f" centre line on average, off the track {100 * outside.mean():.0f}% of the"
-        f" time, model error {np.sqrt((error[part] ** 2).mean()):.2f} m/s."
+        f"[race] {name} the change: {np.abs(off_centre[part]).mean():.2f} m from the"
+        f" centre line on average, off the track {100 * (beyond > 0).mean():.0f}%"
+        f" of the time and {100 * beyond.mean():.1f} cm beyond its edge on average,"
+        f" model error {np.sqrt((error[part] ** 2).mean()):.2f} m/s."
       )
   if not args.no_video:
     print(f"[race] Video: {args.out}")
