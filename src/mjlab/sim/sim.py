@@ -34,6 +34,21 @@ else:
 _GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
 
 
+def _get_field(obj: object, field: str) -> object:
+  """Attribute `field` of `obj`; nested fields are named by path, "opt.gravity"."""
+  for part in field.split("."):
+    obj = getattr(obj, part)
+  return obj
+
+
+def _has_field(obj: object, field: str) -> bool:
+  try:
+    _get_field(obj, field)
+  except AttributeError:
+    return False
+  return True
+
+
 @contextmanager
 def _suspend_gc():
   """Temporarily disable the garbage collector.
@@ -439,11 +454,14 @@ class Simulation:
   # Methods.
 
   def expand_model_fields(self, fields: tuple[str, ...]) -> None:
-    """Expand model fields to support per-environment parameters."""
+    """Expand model fields to support per-environment parameters.
+
+    Nested fields are named by their path, such as "opt.gravity".
+    """
     if not fields:
       return
 
-    invalid_fields = [f for f in fields if not hasattr(self._mj_model, f)]
+    invalid_fields = [f for f in fields if not _has_field(self._mj_model, f)]
     if invalid_fields:
       raise ValueError(f"Fields not found in model: {invalid_fields}")
 
@@ -467,10 +485,10 @@ class Simulation:
     randomized values.
     """
     if field not in self._default_model_fields:
-      if not hasattr(self._mj_model, field):
+      if not _has_field(self._mj_model, field):
         raise ValueError(f"Field '{field}' not found in model")
-      model_field = getattr(self.model, field)
-      default_value = getattr(self._mj_model, field)
+      model_field = cast(TorchArray, _get_field(self.model, field))
+      default_value = _get_field(self._mj_model, field)
       self._default_model_fields[field] = torch.as_tensor(
         default_value, dtype=model_field.dtype, device=self.device
       ).clone()

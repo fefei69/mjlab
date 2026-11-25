@@ -23,6 +23,9 @@ Added
   fields to the exported ONNX metadata by overriding it, and
   ``MjlabOnPolicyRunner.export_onnx_on_save`` to export ONNX on every checkpoint.
   The velocity, manipulation and tracking runners now share this export path.
+- ``Simulation.expand_model_fields()`` and ``Simulation.get_default_field()``
+  accept nested fields by path, such as ``"opt.gravity"``, so gravity can differ
+  per environment. Event terms can list them in ``model_fields``.
 
 Changed
 ^^^^^^^

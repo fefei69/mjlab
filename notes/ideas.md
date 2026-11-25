@@ -644,3 +644,130 @@ The plan records the chop in CPU MuJoCo. That may not be needed: mjlab's video r
 **Status:** `open` · 2026-11-11
 
 The fork is v1.6.0 plus 60 commits, including the upgrade from MuJoCo 3.11 to 3.16. The baseline ran on that commit, so pinning it keeps later runs comparable.
+
+### 6.3 Box-jump demo: the main demo from 2026-11-24
+
+**Status:** `scene built` · 2026-11-24
+
+cpw changed the story: the main demo is now a run along a long box to build up speed and a jump onto a smaller box, while gravity and foot friction change; the robot has to adapt in time to land on the box. Motor faults become a bonus task.
+
+**Numbers, picked as a starting point** (in `src/mjlab/tasks/box_jump/course.py`, `DEMO_*`; to retune once a jump policy exists):
+
+| What | Value | Why |
+|---|---|---|
+| Long box | 6.0 x 1.0 m, top 0.4 m above the ground | 5.5 m of run-up from the spawn point reaches 2 to 3 m/s with room to spare |
+| Gap | 0.5 m | Near Go1's body length (0.65 m); published robots of its size leap 0.6 m (Zhuang et al., Robot Parkour Learning, 2023) |
+| Landing box | 1.0 x 1.0 m, same height | Short enough that a 20 to 40% error in jump length misses it |
+| Gravity after the change | 7 to 12 m/s^2 (nominal 9.81) | Same take-off lands 40% farther at 7, 18% shorter at 12 (point mass) |
+| Foot friction after the change | 0.4 to 1.0 (nominal 1.0; training saw 0.3 to 1.5) | At 0.4 the robot slides about 0.7 m when braking from 2 m/s, against 0.2 m at 1.0 (point mass) |
+| When | 2.5 m before the edge | About 1 s before take-off at 2.5 m/s |
+
+**Friction is the feet's.** Go1's foot geoms have contact priority, so their friction is the friction of every foot contact and the boxes' own friction does not matter. Changing "the ground's" friction means changing the feet's, as the existing training randomization does.
+
+**Built:**
+
+- `BoxJumpCourseCfg`, a terrain tile with the course. Its gap and landing-box length can grow with difficulty for a curriculum; `layout(difficulty)` gives where the parts are relative to the spawn point.
+- Per-robot gravity: mjlab can now expand nested model fields such as `opt.gravity`. MuJoCo Warp already reads gravity per world.
+- `physics_change`, a step event: each episode, gravity and foot friction start at nominal or at a random value, and change once when the robot passes a line a set distance from its spawn point.
+- `mppi/demo_box_jump.py`: the velocity policy runs a fixed speed ramp at the gap. It reaches 2.57 m/s, the change comes at 2.3 s, and at the edge its front legs hit the face of the landing box and it drops into the gap. As expected: it has no jump skill.
+
+**Not built yet:** a jump skill (the critical path), a jump model for the planner (run-up plus ballistic flight), and a task with rewards for landing on the box.
+
+**MPPI today plans only (vx, vy, wz):** forward, sideways and turning speed, 10 steps of 0.1 s. Nothing vertical, no take-off timing.
+
+### 6.4 Compute cost of a full-model sampling planner (DIAL-MPC style)
+
+**Status:** `measured` · 2026-11-24
+
+DIAL-MPC (LeCAR lab, arXiv 2409.15610) jumps with no learned policy: MPPI-style sampling over joint torques, rolling out the full robot model, with the jump given only by contact and body-position targets. It reports 50 Hz replanning on an RTX 4090 with 2,048 samples over 0.4 s (20 steps), and the 0.6 m crate climb took about 30 s to plan 2 s (not real time). It does not adapt online, and shows no running jumps.
+
+**Our cost** on the RTX 5080, Go1 on the box course in mjlab (MuJoCo Warp). One planning iteration means copying the current state into every world and rolling out noisy joint targets, so the robots move, as in a real plan. Times in ms:
+
+| Samples | Timestep | 0.4 s horizon | 1.0 s horizon |
+|---|---|---|---|
+| 256 | 5 ms | 61 | 157 |
+| 1,024 | 5 ms | 82 | 211 |
+| 2,048 | 5 ms | 109 | 286 |
+| 4,096 | 5 ms | 169 | 445 |
+| 8,192 | 5 ms | 288 | 755 |
+| 2,048 | 10 ms | 67 | 173 |
+| 1,024 | 20 ms | 29 | 73 |
+| 2,048 | 20 ms | 41 | 106 |
+
+- **Samples are cheap, steps are not.** Each physics step has a floor of roughly 0.8 to 1.5 ms however few worlds there are, so the horizon and timestep set the cost.
+- **Moving robots cost two to three times more than standing ones** (110 against 47 ms for 2,048 samples over 0.4 s). The solver needs more iterations, and MuJoCo Warp floods "linesearch iterations limit reached" warnings (`ls_iterations` 20).
+- **Real time at 50 Hz (20 ms) is out of reach**, even for one iteration at the cheapest setting.
+- **A simulated demo can still run it** if the simulated robot waits for the planner. For example, 2,048 samples, 1 s horizon, 10 ms timestep, 2 iterations, replanning at 50 Hz is about 17 s of compute per simulated second.
+- **Not measured:** cheaper contact settings for planning worlds (condim 3, fewer solver iterations). The 20 ms timestep stayed stable under random joint targets but was not tested on running or landing impacts.
+
+### 6.5 The jump policy: take-off command split, with accelerometer
+
+**Status:** `training` · 2026-11-24
+
+cpw chose this split: the policy runs, takes off on command with a commanded vertical speed, lands and brakes; the planner decides the run-up speed and when to trigger, predicting the landing point from a ballistic model with gravity and friction estimated online.
+
+**Tasks:** `Mjlab-BoxJump-Unitree-Go1` (no history) and `Mjlab-BoxJump-Unitree-Go1-History` (0.5 s of history, the main policy), in `src/mjlab/tasks/box_jump/`.
+
+- **Output:** 12 joint position targets at 50 Hz, as for the velocity policy.
+- **Actor inputs:**
+  - the velocity policy's body inputs;
+  - the IMU accelerometer, which reads gravity plus the trunk's acceleration;
+  - the command `(vx, vy, wz, vz)`: `vz` is 0 while running; above 0 it means take off now at that vertical speed, held until touch-down. (A separate jump flag was dropped on 2026-11-24 at cpw's request: same information, no mode bit.);
+  - the course ahead: distance to the edge and to the start and end of the landing box.
+  - The history variant sees 25 past steps of everything except the command and the course: 1,207 inputs.
+- **Critic adds:** true gravity and foot friction, trunk height, jump phase, and foot contacts.
+- **The coach (the planner's stand-in in training):** steers along the centre line, ramps the run-up speed, triggers the jump so the trunk lifts off about 5 cm before the edge, and sets the vertical speed from a ballistic flight under the episode's true gravity, aiming the trunk 5 to 30 cm past the start of the landing box (±10% noise). After touch-down it commands a stop. The run-up speed is raised where needed so the take-off speed stays at most 2 m/s.
+- **Phases:** run, take-off (triggered, feet still down), flight (all feet off for two steps), landed (first touch-down).
+- **Rewards:**
+  - planar velocity tracking, plus no vertical motion on the ground;
+  - yaw rate;
+  - at lift-off, once: closeness to the commanded vertical and forward speed (weight 300, worth up to 6);
+  - upward push while taking off;
+  - on the landing box after touch-down;
+  - flat body, action rate, joint limits, torques, thigh and shank contacts;
+  - falling: -200, worth -4.
+- **Ends on:** trunk below the box tops, tilt over 80 degrees, trunk contact, or 6 s.
+- **Curriculum:** 10 rows, gap 0.1 to 0.7 m, landing box 2.0 to 1.0 m. Landing on the box moves an environment up a row; anything else moves it down.
+- **Gravity and friction:** each episode starts with gravity 7 to 12 m/s^2 and foot friction 0.4 to 1.2. In half of the episodes both change once on the run-up, to 7 to 12 and 0.4 to 1.0.
+
+### 6.6 The planner side of the jump
+
+**Status:** `built, waiting for the trained policies` · 2026-11-24
+
+- **`mppi/jump_planner.py`, the planner:**
+  - For every robot at once, it searches a grid of run-up speed (1 to 3 m/s) and take-off vertical speed (0.5 to 2 m/s) through a jump model, and replans every step until the trigger.
+  - The model has four parts:
+    - **Take-off:** the trunk lifts off just before the edge, at the speed the robot can still reach.
+    - **Flight:** ballistic under the estimated gravity.
+    - **Calibration:** the policy's actual take-off speed for a commanded one.
+    - **Landing check:** the trunk must touch down past the start of the box and brake to a stop before its end, at a deceleration set by friction × gravity.
+  - It keeps the plan with the largest margin to both ends.
+- **Gravity estimate: momentum balance.** Gravity = average upward foot force ÷ mass − trunk vertical acceleration, using the contact sensor's force at every physics step.
+  - Reading the accelerometer once per 20 ms policy step read 2 to 3 m/s^2 low while running, because it missed the short foot impacts. A real IMU integrates at a high rate, so this was a simulation artefact.
+  - At the trigger the new estimate is within 0.12 m/s^2 (median).
+- **Friction estimate.** Slipping feet show the friction; gripping feet bound it from below. It starts at a prior of 1.0. On the first, flawed checkpoint it read about 0.3 low at the trigger: conservative.
+- **`mppi/run_box_jump.py`:** runs the policy with the planner on the demo course across many robots, with gravity and friction from one of three sources:
+  - `nominal`: fixed at 9.81 and 1.0;
+  - `online`: the estimates above;
+  - `oracle`: the simulator's true values.
+  - Every source sees the same changes. `--video` records robot 0.
+- **`mppi/fit_jump_model.py`:** calibrates the jump model to a policy:
+  - take-off vertical speed against the command and gravity;
+  - forward speed;
+  - trigger-to-lift-off time;
+  - touch-down beyond the point-mass flight;
+  - braking efficiency.
+  - It saves `jump_model.json` next to the checkpoint.
+- **The jump command** has a `coach=False` mode, in which a planner sets the plan through `set_plan`.
+
+**First run, on a flawed early checkpoint** (iteration 250 of the first training, 64 robots, gravity 7 to 12 and friction 0.4 to 1.0 after the change):
+
+| Source | Lands on box | Falls |
+|---|---|---|
+| Nominal | 61% | 39% |
+| Online | 70% | 16% |
+| Oracle | 92% | 6% |
+
+A second run with 128 robots gave 66%, 76% and 74%, so these early numbers are noisy. The calibration on that checkpoint showed why: the policy ignored the take-off command (R^2 0.02).
+
+**The flaw, fixed:** the first training counted the running gait's brief moment with all feet in the air as a lift-off, so the policy was never pushed to follow the commanded take-off speed (median error 1.3 m/s). A lift-off now needs three steps in the air with the trunk rising at 0.25 m/s or more, and the take-off reward is wider. In the retrained no-history policy the error is 0.30 m/s by iteration 200.

@@ -54,3 +54,18 @@ def expand_model_fields(
       if array.shape[0] != 1:
         continue  # Already per-world (e.g., variant compilation).
       setattr(model, field, tile(array))
+
+  # Nested fields, named by their path, such as "opt.gravity".
+  for field in fields_to_expand:
+    if "." not in field:
+      continue
+    path, name = field.rsplit(".", 1)
+    parent: Any = model
+    for part in path.split("."):
+      parent = getattr(parent, part)
+    array = getattr(parent, name)
+    if not isinstance(array, wp.array):
+      raise ValueError(f"Model field '{field}' is not an array.")
+    if array.shape[0] != 1:
+      continue
+    setattr(parent, name, tile(array))

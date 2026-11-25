@@ -8,7 +8,7 @@
 | 2 | Damage injection | Started | Mid-episode motor faults for training (`mdp.motor_fault`, 2026-11-24). No calf cut yet. |
 | 3 | Meta-RL policy | Started | Preliminary P1, P2 and a fault-score policy, 3,000 iterations each (2026-11-24). |
 | 4 | Planner | Started | MPPI, the planar model and its least-squares fit exist and run on the undamaged policy in two demos (2026-11-11). The online residual model exists, is tested on made-up data, and runs in the race loop against a steady pull on the trunk (2026-11-20). Still missing: a safe default for its features, and a path task with damage. |
-| 5 | Evaluation and demo | Not started | |
+| 5 | Evaluation and demo | Started | The main demo is now the box jump ([ideas.md](ideas.md), entry 6.3). Its scene is built (2026-11-24); there is no jump skill yet. |
 
 Still to set: the deadline and checkpoint dates.
 
@@ -26,7 +26,28 @@ Still to set: the deadline and checkpoint dates.
 
 ### 2026-11-24
 
-All action items for the planner side, plus preliminary versions of S2, S4, P1 and P2 so they could be tested. Details in [ideas.md](ideas.md), entry 3.11, "Sixth" to "Eighth step", and entry 5.7. Not committed yet.
+**Change of direction (cpw):** the main demo is now a run-up along a long box and a jump onto a smaller box, with friction and gravity changing while the robot runs, so it has to adapt fast enough to land on the box. Motor faults become a bonus task. Demo numbers (box sizes, gap, how far and when gravity and friction change) are not set yet.
+
+**Can the current framework do it? No.** Checked against the code:
+
+- **No jump skill.** Every policy only tracks a planar velocity command on flat ground (baseline up to 3 m/s forward, P1 and P2 up to 1 m/s).
+- **The planner can't predict a jump.** The planar model has no height and no flight phase.
+- **The flat-task policies see no terrain.** The rough Go1 task already has a 1.6 x 1.0 m height scan, and mjlab has box terrains.
+- **Gravity can't vary per robot yet.** `Simulation.expand_model_fields` only handles top-level model fields, and gravity lives in `model.opt`. MuJoCo Warp itself allows per-world gravity (`opt.gravity` is a batched array), so this is a small patch.
+- **The policy sees only gravity's direction.** Its gravity input is a unit vector, so g's size is visible only through how the body moves.
+- **Friction is already randomized per robot** (foot friction 0.3 to 1.5, at startup). Changing it mid-run is a step event like `motor_fault`.
+
+What carries over: the MPPI core, the batched online residual, history-based training (as in P2), step events for mid-run changes, and batched evaluation.
+
+**Scene built** ([ideas.md](ideas.md), entry 6.3, with the numbers and why):
+
+- The course is a terrain tile (`src/mjlab/tasks/box_jump/course.py`): a 6 m run-up box, a 0.5 m gap and a 1 x 1 m landing box, all 0.4 m high.
+- **Per-robot gravity:** mjlab can now expand `opt.gravity`.
+- **`physics_change` step event:** changes gravity and foot friction once, when the robot passes a line.
+- **Preview** (`uv run python -m mppi.demo_box_jump`, video `logs/mppi/box_jump_scene.mp4`): the velocity policy runs at the gap at 2.5 m/s, then hits the face of the landing box and drops into the gap.
+- **Tests:** `tests/test_box_jump.py`.
+
+All action items for the planner side, plus preliminary versions of S2, S4, P1 and P2 so they could be tested. Details in [ideas.md](ideas.md), entry 3.11, "Sixth" to "Eighth step", and entry 5.7. Committed in `32ac2d2ba` and `2e95e0b3f`; the fault-trained checkpoints are not in git. Videos of three fault cases are in `logs/mppi/fault_r3.mp4`, `fault_thigh.mp4` and `fault_knee.mp4` (training PC only).
 
 - **S2, mid-run motor fault** (`mdp.motor_fault`): one joint per episode, torque scale 0 to 0.5, 80% of episodes, start between 1 and 12 s, undone on reset. The critic sees every joint's torque scale. Preliminary S4 in `FAULT_TRAIN_PARAMS`; the front left knee is held out.
 - **P1, P2 and a fault-score policy**, 3,000 iterations each, in `mppi/checkpoints/go1_fault*/`. Under random commands up to 1 m/s, after a dead knee: baseline 82% fall, P1 34%, P2 16%. They are trained only up to 1 m/s (the curriculum widens at 5,000 iterations).
