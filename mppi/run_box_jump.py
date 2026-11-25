@@ -50,6 +50,7 @@ from mppi.jump_mppi import (
 )
 from mppi.jump_planner import (
   NOMINAL_GRAVITY,
+  CentroidalGravityEstimator,
   FrictionEstimator,
   GravityEstimator,
   JumpModelCfg,
@@ -184,7 +185,23 @@ def run_mode(
   assert isinstance(feet_sensor, ContactSensor)
   foot_sites = robot.find_sites(FEET, preserve_order=True)[0]
   mass = float(env.sim.mj_model.body_mass[robot.indexing.body_ids.cpu()].sum())
-  gravity_est = GravityEstimator(n, dt, mass, device=device)
+  # Gravity from the whole robot's momentum (default), or from the trunk's
+  # (the first version, kept for comparison). Both run; one feeds the planner.
+  masses = torch.as_tensor(
+    env.sim.mj_model.body_mass[robot.indexing.body_ids.cpu()],
+    dtype=torch.float32,
+    device=device,
+  )
+  trunk_est = GravityEstimator(n, dt, mass, device=device)
+  centroidal_est = CentroidalGravityEstimator(
+    n, dt, mass, window=getattr(args, "gravity_window", 3), device=device
+  )
+  gravity_est = (
+    centroidal_est
+    if getattr(args, "gravity_estimator", "centroidal") == "centroidal"
+    else trunk_est
+  )
+  gravity_trace: list[torch.Tensor] = []
   friction_est = FrictionEstimator(n, device=device)
   mppi = planner if isinstance(planner, JumpMppi) else None
   tracking = planner if isinstance(planner, JumpTrackingMppi) else None
@@ -198,7 +215,11 @@ def run_mode(
         torch.ones(n, device=device),
       )
     if mode == "online":
-      return gravity_est.gravity, friction_est.friction
+      # Only plausible values reach the planner.
+      return (
+        gravity_est.gravity.clamp(3.0, 20.0),
+        friction_est.friction.clamp(0.05, 2.0),
+      )
     return change.gravity, change.friction
 
   reference = None
@@ -322,7 +343,22 @@ def run_mode(
       # Estimates from this step's sensors.
       force, history = feet_sensor.data.force, feet_sensor.data.force_history
       assert force is not None and history is not None
-      gravity_est.update(history, robot.data.root_link_lin_vel_w)
+      com_vel = (robot.data.body_com_lin_vel_w * masses[None, :, None]).sum(1)
+      com_vel = com_vel / masses.sum()
+      trunk_est.update(history, robot.data.root_link_lin_vel_w)
+      centroidal_est.update(history, com_vel)
+      gravity_trace.append(
+        torch.stack(
+          [
+            change.gravity,
+            trunk_est.gravity,
+            centroidal_est.gravity,
+            centroidal_est.last_sample,
+            (cmd.phase == JumpPhase.RUN).float(),
+          ],
+          dim=-1,
+        )
+      )
       friction_est.update(force, robot.data.site_lin_vel_w[:, foot_sites])
       gravity, friction = estimates()
 
@@ -332,7 +368,11 @@ def run_mode(
       x_now = cmd.position()[:, 0]
       speed_now = robot.data.root_link_lin_vel_b[:, 0]
       if mppi is not None:
-        if k % args.replan_every == 0:
+        # Close to the edge, replan every control step: a late change must reach
+        # the plan before the trigger.
+        edge_now = cmd.course()[0]
+        near = running & (x_now > edge_now - getattr(args, "fast_replan_distance", 1.5))
+        if k % args.replan_every == 0 or bool(near.any()):
           if tracking is not None and references is not None:
             # A global reference from the latest estimates, then track it.
             reference = references.plan(
@@ -468,6 +508,9 @@ def run_mode(
     "friction_used": used_friction.cpu().numpy(),
     # (T, B, 4): command, speed before and after the step, still running.
     "speed_trace": torch.stack(speed_trace).cpu().numpy(),
+    # (T, B, 5): true gravity, trunk and centroidal estimates, the centroidal
+    # estimator's raw sample, still running.
+    "gravity_trace": torch.stack(gravity_trace).cpu().numpy(),
   }
 
 
@@ -494,6 +537,13 @@ def main() -> None:
   )
   p.add_argument("--vz-jitter", type=float, default=0.0, help=argparse.SUPPRESS)
   p.add_argument(
+    "--gravity-estimator",
+    choices=("centroidal", "trunk"),
+    default="centroidal",
+    help="centroidal: whole-robot momentum, 0.1 s median; trunk: the trunk's"
+    " velocity, 0.3 s average (the first version).",
+  )
+  p.add_argument(
     "--planner",
     choices=("tracking", "mppi", "grid"),
     default="tracking",
@@ -504,6 +554,18 @@ def main() -> None:
     "--replan-every", type=int, default=5, help="MPPI: policy steps per re-plan."
   )
   p.add_argument("--samples-shown", type=int, default=32, help="Drawn in the video.")
+  p.add_argument(
+    "--fast-replan-distance",
+    type=float,
+    default=1.5,
+    help="Within this distance of the edge, replan every control step (m).",
+  )
+  p.add_argument(
+    "--gravity-window",
+    type=int,
+    default=3,
+    help="Control steps in the gravity estimate's median (0.02 s each).",
+  )
   p.add_argument("--cam-distance", type=float, default=CAMERA[0])
   p.add_argument("--cam-elevation", type=float, default=CAMERA[1])
   p.add_argument(

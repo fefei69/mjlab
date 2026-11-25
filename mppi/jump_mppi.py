@@ -281,7 +281,8 @@ class JumpMppi:
       if extra is not None:
         raw[:, 1 : 1 + extra.shape[1]] = extra
       out = self.rollout(raw, x0, v0, course, gravity, friction)
-      cost = out.cost
+      # A robot that has fallen can give nonsense; never let it poison the plan.
+      cost = torch.nan_to_num(out.cost, nan=1e6, posinf=1e6, neginf=-1e6)
       z = (cost - cost.min(dim=1, keepdim=True).values) / (
         cost.std(dim=1, keepdim=True) + 1e-6
       )

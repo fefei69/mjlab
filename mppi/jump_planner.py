@@ -203,6 +203,52 @@ class GravityEstimator:
     self._prev_vz = None
 
 
+class CentroidalGravityEstimator:
+  """Gravity from the whole robot's momentum: exact per step, so a short window.
+
+  Over one policy step, total mass * (change in centre-of-mass velocity) =
+  upward foot impulse - mass * gravity * step. With the foot forces of every
+  physics step and the centre-of-mass velocity of all bodies (not the trunk's,
+  which the swinging legs disturb), each step gives a nearly exact sample. The
+  estimate is the median of the last `window` samples, 0.06 s by default, which
+  also rejects steps where a knee or the trunk touches the course.
+  """
+
+  def __init__(
+    self, num_envs: int, dt: float, mass: float, window: int = 3, device: str = "cpu"
+  ):
+    self.dt = dt
+    self.mass = mass
+    self.samples = torch.full((num_envs, window), NOMINAL_GRAVITY, device=device)
+    self.gravity = torch.full((num_envs,), NOMINAL_GRAVITY, device=device)
+    self.last_sample = torch.full((num_envs,), NOMINAL_GRAVITY, device=device)
+    self._prev_vz: torch.Tensor | None = None
+
+  def update(
+    self, force_history: torch.Tensor, com_vel_w: torch.Tensor
+  ) -> torch.Tensor:
+    """force_history (B, feet, substeps, 3) world contact forces; com_vel_w (B, 3)
+    the whole robot's centre-of-mass velocity."""
+    push = force_history[..., 2].mean(dim=-1).sum(dim=-1).abs()
+    vz = com_vel_w[:, 2]
+    if self._prev_vz is not None:
+      self.last_sample = push / self.mass - (vz - self._prev_vz) / self.dt
+      # A robot lying on the course carries its weight on its body, not its feet,
+      # and reads near zero: keep only plausible samples.
+      valid = (self.last_sample > 2.0) & (self.last_sample < 25.0)
+      rolled = torch.cat([self.samples[:, 1:], self.last_sample[:, None]], dim=1)
+      self.samples = torch.where(valid[:, None], rolled, self.samples)
+      self.gravity = self.samples.median(dim=1).values
+    self._prev_vz = vz.clone()
+    return self.gravity
+
+  def reset(self, env_ids: torch.Tensor | None = None) -> None:
+    ids = slice(None) if env_ids is None else env_ids
+    self.samples[ids] = NOMINAL_GRAVITY
+    self.gravity[ids] = NOMINAL_GRAVITY
+    self._prev_vz = None
+
+
 class FrictionEstimator:
   """Foot friction from how hard the feet push sideways, and when they slip.
 

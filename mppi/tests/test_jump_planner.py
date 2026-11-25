@@ -4,6 +4,7 @@ import torch
 
 from mppi.jump_planner import (
   NOMINAL_GRAVITY,
+  CentroidalGravityEstimator,
   FrictionEstimator,
   GravityEstimator,
   JumpModelCfg,
@@ -81,3 +82,21 @@ def test_friction_estimate_follows_slips_and_respects_grip():
   force[1, :, 0] = 60.0  # Gripping at 1.2: friction is at least that.
   est.update(force, vel)
   assert abs(est.friction[1].item() - 1.2) < 1e-5
+
+
+def test_centroidal_gravity_follows_a_change_within_a_few_steps():
+  mass, dt = 12.0, 0.02
+  est = CentroidalGravityEstimator(1, dt, mass)
+  vel = torch.zeros(1, 3)
+  gravity = 9.81
+  for k in range(40):
+    if k == 20:
+      gravity = 7.0  # Gravity drops mid-run.
+    accel = 3.0 * torch.sin(torch.tensor(k * 0.6)).item()  # The body bobs.
+    vel[:, 2] += accel * dt
+    history = torch.zeros(1, 4, 4, 3)
+    history[..., 2] = mass * (gravity + accel) / 4  # Split over the four feet.
+    est.update(history, vel.clone())
+    if k == 23:  # Three steps after the change: the median has moved.
+      assert abs(est.gravity.item() - 7.0) < 1e-3
+  assert abs(est.gravity.item() - 7.0) < 1e-3

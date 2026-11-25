@@ -911,3 +911,44 @@ Still to try for DIAL: a 0.005 s planning step (matching the robot exactly, abou
 - **Cost:** about 12x slower than real time, against MPPI + RL planning 256 robots in about 60 ms per 0.1 s.
 - **The authors' 0.4 s horizon** was for standing hops of 0.4 m every 1 s, with no run-up or braking.
 - **Video:** `logs/dial/box_jump_h08_rows.mp4`. In its seed the fixed-values robot also landed, which is the 1-in-10 exception.
+
+### 6.10 A faster gravity estimate: the whole robot's momentum
+
+**Status:** `built and measured` · 2026-11-25
+
+The first gravity estimate used the trunk's velocity in the momentum balance. The legs are about a quarter of the mass and swing fast, so their momentum changes read as gravity, and it needed a 0.3 s average.
+
+`CentroidalGravityEstimator` (`mppi/jump_planner.py`) uses the centre-of-mass velocity of all bodies. Over one policy step, the feet's upward impulse minus the change of total momentum is then almost exactly mass × gravity × step. The estimate is the median of the last 5 steps (0.1 s). Samples outside 2 to 25 m/s^2 are ignored: a robot lying on the course carries its weight on its body, not its feet, and reads near zero. Online estimates passed to the planner are clamped to plausible values, and the MPPI replaces NaN costs.
+
+**Measured** (128 robots, full range, online):
+- trunk estimator: error while running median 0.16 and 90th percentile 0.81 m/s^2; time to within 0.3 m/s^2 after a change: median 0.80 s, 90th percentile 1.06 s;
+- whole-robot estimator: 0.04 and 0.14 m/s^2; median 0.06 s, 90th percentile 0.08 s, about 13 times faster.
+
+**Adaptation test again** (tracking planner, 256 robots; `logs/mppi/eval_adaptation_centroidal.txt`):
+
+| Change before edge | Online, trunk estimator | Online, whole-robot estimator | True | Gravity error at trigger (trunk, whole-robot) |
+|---|---|---|---|---|
+| 2.5 m | 100% | 100% | 100% | 0.19, 0.04 |
+| 1.5 m | 98% | 100% | 100% | 0.54, 0.04 |
+| 1.0 m | 85% | 89% | 97% | 0.86, 0.05 |
+| 0.5 m | 77% | 76% | 69% | about 1.3 (the change comes after the trigger) |
+
+**What is left at 1.0 m** (a rerun gave 86%): both estimates are accurate at the trigger.
+- Gravity error: median 0.05 m/s^2.
+- Friction minus true: median -0.07, the same for misses and successes.
+- So the gap to the true values is reaction time. The change comes only 0.14 s before the trigger; the median needs 3 steps (0.06 s) to switch, and the planner replans every 0.1 s. The plan's run-up was set with the old values.
+- Next: replan every policy step near the edge, and a shorter median window.
+
+**Faster reaction** (2026-11-25): the planner now replans every control step (0.02 s) once a robot is within 1.5 m of the edge, and the gravity median uses 3 steps (0.06 s). Adaptation test again (tracking planner, 256 robots; `logs/mppi/eval_adaptation_fast.txt`):
+
+| Change before edge | Fixed | Online | True | Gravity error at trigger | Change to trigger |
+|---|---|---|---|---|---|
+| 2.5 m | 73% | 100% | 100% | 0.06 m/s^2 | 0.60 s |
+| 1.5 m | 71% | 100% | 100% | 0.06 | 0.28 s |
+| 1.0 m | 70% | 99% | 100% | 0.06 | 0.12 s |
+| 0.5 m | 75% | 86% | 75% | 1.32 | -0.06 s |
+
+- **At 1.0 m, online now matches the true values:** 99% against 100%. The change comes only 0.12 s before the trigger.
+- **At 0.5 m the change comes after the trigger,** so the planner cannot use it. Online's 86% against 75% for the true values most likely comes from the friction estimate reading low, which gives more braking room. Not verified.
+
+**Video:** `logs/mppi/box_jump_late_change_rows.mp4`, with gravity 7 and friction 0.5 changing 1.0 m before the edge. Over 64 robots: fixed 0%, online 100%, true 98%. With fixed values the robot jumps high (vz 1.95 m/s) and overshoots the box. With online or true values it switches to a low, fast jump (about 0.85 m/s up at about 2.9 m/s), lands and stops.
