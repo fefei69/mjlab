@@ -25,6 +25,8 @@ __all__ = [
   "fell_off_course",
   "jump_phase",
   "landed_on_pad",
+  "landing_brake",
+  "speed_after_landing",
   "physics_params",
   "takeoff_push",
   "takeoff_velocity",
@@ -121,6 +123,27 @@ def takeoff_push(env: ManagerBasedRlEnv, command_name: str = "jump") -> torch.Te
 
 def landed_on_pad(env: ManagerBasedRlEnv, command_name: str = "jump") -> torch.Tensor:
   return _command(env, command_name).success.float()
+
+
+def speed_after_landing(
+  env: ManagerBasedRlEnv, command_name: str = "jump"
+) -> torch.Tensor:
+  """Squared forward speed once landed: to penalize, so the robot stops fast."""
+  cmd = _command(env, command_name)
+  landed = (cmd.phase == JumpPhase.LANDED).float()
+  return landed * cmd.robot.data.root_link_lin_vel_b[:, 0].square()
+
+
+def landing_brake(
+  env: ManagerBasedRlEnv, delay_steps: int = 5, command_name: str = "jump"
+) -> torch.Tensor:
+  """Once, `delay_steps` after touch-down: the share of the forward speed at
+  touch-down shed since, so the landing impact itself brakes."""
+  cmd = _command(env, command_name)
+  start = cmd.landing_vel[:, 0].clamp(min=0.5)
+  now = cmd.robot.data.root_link_lin_vel_w[:, 0]
+  shed = ((start - now) / start).clamp(0.0, 1.0)
+  return (cmd.landed_steps == delay_steps).float() * shed
 
 
 # Terminations.

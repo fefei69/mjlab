@@ -174,9 +174,14 @@ def test_jump_phases_follow_the_robot(device):
       lifted |= bool(cmd.liftoff_now[0])
     assert lifted and cmd.phase[0] == JumpPhase.FLIGHT
 
+    # Feet on the take-off box, like a hind foot scraping its edge: still flying.
+    place(edge[0].item() - 0.3)
+    env.step(zero)
+    assert cmd.phase[0] == JumpPhase.FLIGHT
+
     place(pad_start[0].item() + 0.5)
     env.step(zero)
-    assert cmd.phase[0] == JumpPhase.LANDED
+    assert cmd.phase[0] == JumpPhase.LANDED and cmd.landed_steps[0] == 1
     assert cmd.success.tolist() == [True, False]
     assert cmd.command[0, 0] == 0.0 and cmd.command[0, 3] == 0.0  # Stop.
   finally:

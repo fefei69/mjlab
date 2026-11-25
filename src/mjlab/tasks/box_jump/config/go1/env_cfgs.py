@@ -47,15 +47,32 @@ PHYSICS_PARAMS = {
   "onset_x": (0.5, 4.5),
   "prob": 0.5,
 }
+# The robust variant (2026-11-25): changes come later and more often, a third of
+# them low gravity with low friction, the case where a fast landing is hardest
+# to stop from.
+ROBUST_PHYSICS_PARAMS = {
+  **PHYSICS_PARAMS,
+  "start_friction_range": (0.35, 1.2),
+  "friction_range": (0.35, 1.0),
+  "onset_x": (2.0, 5.0),
+  "prob": 0.6,
+  "hard_prob": 0.3,
+  "hard_gravity_range": (7.0, 8.5),
+  "hard_friction_range": (0.35, 0.6),
+}
 
 
 def unitree_go1_box_jump_env_cfg(
-  play: bool = False, history_length: int = 0
+  play: bool = False, history_length: int = 0, robust: bool = False
 ) -> ManagerBasedRlEnvCfg:
   """Go1 runs along the long box and jumps onto the small one on command.
 
   With `history_length` > 0 the actor sees that many past steps of every
-  observation except the command and the course ahead.
+  observation except the command and the course ahead. `robust` adds a penalty
+  on forward speed after landing, oversamples late, hard gravity and friction
+  changes, and randomizes the robot more: trunk mass (a payload), PD gains,
+  motor torque limits, and small pushes. Those extra randomization events are
+  named "dr_*" so that evaluations can drop them.
   """
   cfg = unitree_go1_rough_env_cfg()
 
@@ -207,6 +224,49 @@ def unitree_go1_box_jump_env_cfg(
     elevation=-12.0,
     azimuth=90.0,
   )
+
+  if robust:
+    cfg.events["physics_change"].params = dict(ROBUST_PHYSICS_PARAMS)
+    cfg.rewards["speed_after_landing"] = RewardTermCfg(
+      func=jump_mdp.speed_after_landing, weight=-2.0
+    )
+    # Off by default: reward shedding speed in the landing impact (fine-tunes).
+    cfg.rewards["landing_brake"] = RewardTermCfg(
+      func=jump_mdp.landing_brake, weight=0.0
+    )
+    robot = SceneEntityCfg("robot")
+    cfg.events["dr_trunk_mass"] = EventTermCfg(
+      func=mdp.dr.body_mass,
+      mode="startup",
+      params={
+        "asset_cfg": SceneEntityCfg("robot", body_names=("trunk",)),
+        "ranges": (0.8, 1.35),  # About -8% to +15% of the whole robot.
+        "operation": "scale",
+      },
+    )
+    cfg.events["dr_pd_gains"] = EventTermCfg(
+      func=mdp.dr.pd_gains,
+      mode="startup",
+      params={"asset_cfg": robot, "kp_range": (0.9, 1.1), "kd_range": (0.9, 1.1)},
+    )
+    cfg.events["dr_motor_strength"] = EventTermCfg(
+      func=mdp.dr.effort_limits,
+      mode="startup",
+      params={"asset_cfg": robot, "effort_limit_range": (0.8, 1.1)},
+    )
+    cfg.events["dr_push"] = EventTermCfg(
+      func=mdp.push_by_setting_velocity,
+      mode="interval",
+      interval_range_s=(1.5, 3.0),
+      params={
+        "velocity_range": {
+          "x": (-0.3, 0.3),
+          "y": (-0.3, 0.3),
+          "z": (-0.1, 0.1),
+          "yaw": (-0.3, 0.3),
+        }
+      },
+    )
 
   if play:
     cfg.episode_length_s = int(1e9)

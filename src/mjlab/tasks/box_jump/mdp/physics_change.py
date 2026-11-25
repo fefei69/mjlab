@@ -43,6 +43,9 @@ class physics_change:
     start_gravity_range: Gravity at the start of each episode. Default nominal.
     start_friction_range: Foot friction at the start of each episode. Default
       nominal. This replaces any other foot-friction randomization.
+    hard_prob: Share of changes drawn from the hard ranges below instead.
+    hard_gravity_range, hard_friction_range: Low gravity and low friction, the
+      combination that makes landing on and stopping on the box hardest.
   """
 
   # Read by the event manager: give every world its own gravity and friction.
@@ -89,6 +92,12 @@ class physics_change:
     )
     self._new_gravity[env_ids] = uniform(p["gravity_range"])
     self._new_friction[env_ids] = uniform(p["friction_range"])
+    hard_prob = p.get("hard_prob", 0.0)
+    if hard_prob > 0.0:
+      hard = torch.rand(n, device=device) < hard_prob
+      hard_ids = env_ids[hard]
+      self._new_gravity[hard_ids] = uniform(p["hard_gravity_range"])[hard]
+      self._new_friction[hard_ids] = uniform(p["hard_friction_range"])[hard]
     onset = uniform(p["onset_x"])
     happens = torch.rand(n, device=device) < p.get("prob", 1.0)
     self._onset[env_ids] = torch.where(happens, onset, torch.inf)

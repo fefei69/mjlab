@@ -60,6 +60,8 @@ class JumpCommand(CommandTerm):
     self.takeoff_x = torch.zeros(n, device=device)
     self.landing_x = torch.zeros(n, device=device)
     self.landing_vel = torch.zeros(n, 3, device=device)
+    self.landed_steps = torch.zeros(n, dtype=torch.long, device=device)
+    """Policy steps since touch-down: 1 at the touch-down step, 0 before."""
     self.trigger_x = torch.zeros(n, device=device)
     """Where the jump was triggered, along +x from the spawn point."""
     self.liftoff_now = torch.zeros(n, dtype=torch.bool, device=device)
@@ -70,6 +72,7 @@ class JumpCommand(CommandTerm):
     self._first_air_vel = torch.zeros(n, 3, device=device)
     self.plan_trigger_x = torch.full((n,), torch.inf, device=device)
     self.plan_vz = torch.zeros(n, device=device)
+    self._foot_sites = self.robot.find_sites(cfg.foot_sites, preserve_order=True)[0]
 
     # The course of every terrain row, relative to its spawn point.
     terrain = env.scene.terrain
@@ -177,6 +180,7 @@ class JumpCommand(CommandTerm):
     self._first_air_vel[env_ids] = 0.0
     self.liftoff_now[env_ids] = False
     self.landed_now[env_ids] = False
+    self.landed_steps[env_ids] = 0
     self.success[env_ids] = False
 
   def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
@@ -240,12 +244,20 @@ class JumpCommand(CommandTerm):
     self.takeoff_x[lift] = pos[lift, 0]
     self.phase[lift] = JumpPhase.FLIGHT
 
-    # Flight -> landed at the first touch-down.
-    land = (self.phase == JumpPhase.FLIGHT) & ~in_air & ~lift
+    # Flight -> landed at the first touch-down past the edge. A foot still over
+    # the take-off box, like a hind foot scraping its edge just after lift-off,
+    # does not end the flight.
+    origin_x = self._env.scene.env_origins[:, None, 0]
+    feet_x = self.robot.data.site_pos_w[:, self._foot_sites, 0] - origin_x
+    past_edge = feet_x > (edge + cfg.touchdown_past_edge)[:, None]
+    touching = ((sensor.data.found > 0) & past_edge).any(dim=-1)
+    land = (self.phase == JumpPhase.FLIGHT) & touching & ~lift
     self.landed_now[:] = land
     self.landing_x[land] = pos[land, 0]
     self.landing_vel[land] = vel[land]
     self.phase[land] = JumpPhase.LANDED
+    landed = self.phase == JumpPhase.LANDED
+    self.landed_steps = torch.where(landed, self.landed_steps + 1, 0)
     self.success[:] = (self.phase == JumpPhase.LANDED) & self.on_pad()
 
     # The command for each phase.
@@ -294,6 +306,10 @@ class JumpCommandCfg(CommandTermCfg):
   physics_event: str | None = "physics_change"
   """Event whose `gravity` the coach uses. Nominal gravity without one."""
   contact_sensor: str = "feet_ground_contact"
+  foot_sites: tuple[str, ...] = ("FR", "FL", "RR", "RL")
+  """Sites at the feet, in the order of the contact sensor's feet."""
+  touchdown_past_edge: float = 0.05
+  """A foot in contact ends the flight only this far past the edge, in m."""
 
   def build(self, env: ManagerBasedRlEnv) -> JumpCommand:
     return JumpCommand(self, env)

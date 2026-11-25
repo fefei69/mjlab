@@ -1,7 +1,9 @@
 """Tests for the jump planner and its gravity and friction estimators."""
 
+import numpy as np
 import torch
 
+from mppi.fit_jump_model import fit_braking
 from mppi.jump_planner import (
   NOMINAL_GRAVITY,
   CentroidalGravityEstimator,
@@ -9,6 +11,7 @@ from mppi.jump_planner import (
   GravityEstimator,
   JumpModelCfg,
   JumpPlanner,
+  stop_distance,
 )
 
 COURSE = (torch.tensor([5.5]), torch.tensor([6.0]), torch.tensor([7.0]))
@@ -100,3 +103,29 @@ def test_centroidal_gravity_follows_a_change_within_a_few_steps():
     if k == 23:  # Three steps after the change: the median has moved.
       assert abs(est.gravity.item() - 7.0) < 1e-3
   assert abs(est.gravity.item() - 7.0) < 1e-3
+
+
+def test_braking_defaults_reduce_to_friction_and_fit_recovers_an_impact():
+  cfg = JumpModelCfg(brake_efficiency=0.8)
+  v, mu, g = torch.tensor([2.0]), torch.tensor([0.5]), torch.tensor([9.81])
+  expected = torch.tensor([4.0 / (2 * 0.8 * 0.5 * 9.81)])
+  assert torch.allclose(stop_distance(cfg, v, mu, g), expected)
+  # Stops with a 2 m/s impact and 0.2 m of travel, then friction braking.
+  gen = np.random.default_rng(0)
+  speed = gen.uniform(1.0, 3.2, 2000)
+  friction = gen.uniform(0.4, 1.0, 2000)
+  gravity = gen.uniform(7.0, 12.0, 2000)
+  base = 0.2 + np.clip(speed - 2.0, 0, None) ** 2 / (2 * 0.8 * friction * gravity)
+  stop = base + gen.exponential(0.05, 2000)
+  offset, impact, eff = fit_braking(speed, stop, friction, gravity)
+  fitted = JumpModelCfg(
+    brake_offset=offset, brake_impact_speed=impact, brake_efficiency=eff
+  )
+  pred = stop_distance(
+    fitted,
+    torch.as_tensor(speed),
+    torch.as_tensor(friction),
+    torch.as_tensor(gravity),
+  ).numpy()
+  assert 0.75 < np.mean(stop <= pred) < 0.85  # The 80th percentile.
+  assert abs(impact - 2.0) < 0.3

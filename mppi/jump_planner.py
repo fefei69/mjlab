@@ -57,6 +57,12 @@ class JumpModelCfg:
   command's own ramp closely (measured, not fitted)."""
   brake_efficiency: float = 0.5
   """Braking deceleration as a share of friction * gravity."""
+  brake_impact_speed: float = 0.0
+  """Forward speed the landing impact itself takes away, m/s: a hard landing
+  presses the feet far harder than the robot's weight and brakes beyond what
+  friction * gravity allows."""
+  brake_offset: float = 0.0
+  """Trunk travel during the impact, m."""
   front_margin: float = 0.05
   """The trunk must touch down this far past the start of the landing box."""
   back_margin: float = 0.3
@@ -71,6 +77,17 @@ class JumpModelCfg:
   def load(cls, path: Path) -> JumpModelCfg:
     data = json.loads(path.read_text())
     return cls(**{f.name: data[f.name] for f in fields(cls) if f.name in data})
+
+
+def stop_distance(
+  cfg: JumpModelCfg, speed: torch.Tensor, friction: torch.Tensor, gravity: torch.Tensor
+) -> torch.Tensor:
+  """Trunk travel from touch-down to a stop: the impact takes away up to
+  `brake_impact_speed`, friction * gravity the rest."""
+  left = (speed - cfg.brake_impact_speed).clamp(min=0.0)
+  return cfg.brake_offset + left.square() / (
+    2 * cfg.brake_efficiency * friction * gravity
+  )
 
 
 @dataclass
@@ -130,7 +147,7 @@ class JumpPlanner:
     )
     flight = 2 * vz.clamp(min=0.0) / gravity
     landing_x = takeoff_x + vx * flight + cfg.flight_offset
-    stop = vx.square() / (2 * cfg.brake_efficiency * friction * gravity)
+    stop = stop_distance(cfg, vx, friction, gravity)
     trigger_x = takeoff_x - vx * cfg.push_time
     return landing_x, stop, trigger_x
 
@@ -369,7 +386,7 @@ class ReferencePlanner:
       m.vz_offset + m.vz_gain * vz_cmd + m.vz_gravity_gain * (g - NOMINAL_GRAVITY)
     ).clamp(min=0.0)
     landing_x = takeoff_x + vx * 2 * vz / g + m.flight_offset
-    stop_x = landing_x + vx.square() / (2 * m.brake_efficiency * mu * g)
+    stop_x = landing_x + stop_distance(m, vx, mu, g)
     margin = -torch.maximum(
       pad_start + m.front_margin - landing_x, stop_x - (pad_end - m.back_margin)
     )

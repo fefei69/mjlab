@@ -10,7 +10,9 @@ and medians:
 - its forward speed at lift-off, against the commanded one,
 - the time from the trigger to lift-off,
 - where the trunk touches down beyond the point-mass flight,
-- how hard it brakes after landing, as a share of friction * gravity.
+- how far it travels after landing, from a second run with the planner the
+  demo uses (MPPI tracking a reference) and a late change, so that the braking
+  fit also covers the faster landings of that planner.
 
   uv run python -m mppi.fit_jump_model --checkpoint logs/rsl_rl/.../model_2999.pt
 """
@@ -19,16 +21,50 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import torch
 
 from mjlab.tasks.box_jump.course import (
   DEMO_CHANGE_BEFORE_EDGE,
   DEMO_FRICTION_RANGE,
   DEMO_GRAVITY_RANGE,
 )
-from mppi.jump_planner import NOMINAL_GRAVITY, JumpModelCfg, JumpPlanner
+from mppi.jump_mppi import JumpTrackingMppi
+from mppi.jump_planner import NOMINAL_GRAVITY, JumpModelCfg, JumpPlanner, stop_distance
 from mppi.run_box_jump import TASK_ID, load_policy, make_env, run_mode
+
+
+def fit_braking(
+  speed: np.ndarray,
+  stop: np.ndarray,
+  friction: np.ndarray,
+  gravity: np.ndarray,
+  quantile: float = 0.8,
+  steps: int = 3000,
+) -> tuple[float, float, float]:
+  """Offset, impact speed and efficiency of the braking model, by quantile
+  regression: the model's stop distance is exceeded by 1 - `quantile` of stops."""
+  v, y = torch.as_tensor(speed).float(), torch.as_tensor(stop).float().clamp(min=0)
+  mu_g = torch.as_tensor(friction * gravity).float()
+  raw = torch.tensor([-2.0, 0.0, 0.0], requires_grad=True)  # Softplus-positive.
+  opt = torch.optim.Adam([raw], lr=0.02)
+
+  def params(r: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    offset, impact, eff = torch.nn.functional.softplus(r)
+    return offset, impact, 0.3 + eff  # Efficiency at least 0.3 for sane extrapolation.
+
+  for _ in range(steps):
+    offset, impact, eff = params(raw)
+    pred = offset + (v - impact).clamp(min=0).square() / (2 * eff * mu_g)
+    err = y - pred
+    loss = torch.maximum(quantile * err, (quantile - 1) * err).mean()
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+  offset, impact, eff = (float(x) for x in params(raw.detach()))
+  return offset, impact, eff
 
 
 def main() -> None:
@@ -38,17 +74,26 @@ def main() -> None:
   p.add_argument("--num-envs", type=int, default=1024)
   p.add_argument("--vz-jitter", type=float, default=0.3)
   p.add_argument("--out", type=Path, default=None)
+  p.add_argument(
+    "--save-raw", type=Path, default=None, help="Also save the runs' outcomes."
+  )
+  p.add_argument(
+    "--braking-change-before",
+    type=float,
+    default=1.0,
+    help="Change point of the second run (m before the edge): late, for fast landings.",
+  )
   p.add_argument("--device", default="cuda:0")
   p.add_argument("--seed", type=int, default=0)
   args = p.parse_args()
   args.gravity, args.friction = DEMO_GRAVITY_RANGE, DEMO_FRICTION_RANGE
   args.change_before, args.change_prob = DEMO_CHANGE_BEFORE_EDGE, 1.0
   args.duration, args.video = 5.0, False
+  args.replan_every, args.samples_shown = 5, 0  # For the second run's MPPI.
 
   env = make_env(args)
   vec, policy = load_policy(env, args)
   r = run_mode("oracle", env, vec, policy, JumpPlanner(device=args.device), args)
-  env.close()
 
   jumped = r["jumped"]
   print(f"\n[fit] {args.num_envs} robots, {jumped.mean():.0%} jumped.")
@@ -72,14 +117,6 @@ def main() -> None:
   ballistic = j["takeoff_x"] + j["vx"] * flight
   cfg.flight_offset = float(np.median(j["landed"] - ballistic))
   spread = float(np.std(j["landed"] - ballistic))
-
-  # Braking, from robots that landed on the box and stopped there. A low
-  # percentile, not the median: the planner must not count on its best stops.
-  ok = r["success"]
-  stop = r["final_x"][ok] - r["landed"][ok]
-  decel = r["landing_vx"][ok] ** 2 / (2 * np.clip(stop, 0.02, None))
-  share = decel / (r["friction"][ok] * r["gravity"][ok])
-  cfg.brake_efficiency = float(np.percentile(share, 20))
 
   # Run-up. The gait makes the speed wobble within each stride, so use speed
   # averaged over 0.2 s. Steady speed against a command held for that long, and
@@ -105,6 +142,45 @@ def main() -> None:
   both = whole[k:] & whole[:-k]
   cfg.run_accel = float(np.percentile(np.abs(dv[both]) / (k * dt), 95))
 
+  # Braking, from robots that landed on the box and stopped there: the landing
+  # impact takes away up to some speed, friction * gravity the rest. Fitted to
+  # the 80th percentile of stopping distance, so the planner does not count on
+  # its best stops. The grid planner's run-ups are slow, so a second run with
+  # the demo's planner (given the fit so far) and a late change adds fast
+  # landings; without them the fit extrapolates to them, and badly.
+  def stopped(runs: tuple[dict[str, np.ndarray], ...], key: str) -> np.ndarray:
+    """`key` of the robots that landed on the box and stopped there."""
+    return np.concatenate([run[key][run["success"]] for run in runs])
+
+  def fit_stops(runs: tuple[dict[str, np.ndarray], ...]) -> tuple[np.ndarray, ...]:
+    data = [stopped(runs, k) for k in ("landing_vx", "friction", "gravity")]
+    stops = stopped(runs, "final_x") - stopped(runs, "landed")
+    braking = fit_braking(data[0], stops, data[1], data[2])
+    cfg.brake_offset, cfg.brake_impact_speed, cfg.brake_efficiency = braking
+    return (*data, stops)
+
+  fit_stops((r,))
+  args.vz_jitter, args.change_before = 0.0, args.braking_change_before
+  tracking = JumpTrackingMppi(args.num_envs, cfg, device=args.device)
+  r_fast = run_mode("oracle", env, vec, policy, tracking, args)
+  env.close()
+  if args.save_raw:
+    runs = (("", r), ("fast_", r_fast))
+    raw: dict[str, Any] = {f"{pre}{k}": v for pre, run in runs for k, v in run.items()}
+    np.savez(args.save_raw, **raw)
+  land_speed, friction, gravity, stops = fit_stops((r, r_fast))
+  covered = float(
+    np.mean(
+      stops
+      <= stop_distance(
+        cfg,
+        torch.as_tensor(land_speed),
+        torch.as_tensor(friction),
+        torch.as_tensor(gravity),
+      ).numpy()
+    )
+  )
+
   print(
     f"[fit] Take-off vz = {cfg.vz_offset:.2f} + {cfg.vz_gain:.2f} * command"
     f" + {cfg.vz_gravity_gain:.3f} * (g - 9.81), R2 {r2:.2f}."
@@ -120,9 +196,11 @@ def main() -> None:
     f" (spread {spread:.3f} m)."
   )
   print(
-    f"[fit] Braking: {cfg.brake_efficiency:.2f} of friction * gravity, 20th"
-    f" percentile; median {np.median(share):.2f} ({ok.sum()} robots that stopped"
-    " on the box)."
+    f"[fit] Braking: the impact takes {cfg.brake_impact_speed:.2f} m/s over"
+    f" {cfg.brake_offset:.2f} m, then {cfg.brake_efficiency:.2f} of friction *"
+    f" gravity; covers {covered:.0%} of {len(stops)} stops (median stop"
+    f" {np.median(stops):.2f} m; landing speeds {np.percentile(land_speed, 5):.1f}"
+    f" to {np.percentile(land_speed, 95):.1f} m/s)."
   )
   out = args.out or args.checkpoint.parent / "jump_model.json"
   cfg.save(out, checkpoint=str(args.checkpoint), r2_vz=float(r2))

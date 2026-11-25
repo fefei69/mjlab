@@ -57,6 +57,7 @@ from mppi.jump_planner import (
   JumpPlanner,
   Reference,
   ReferencePlanner,
+  stop_distance,
 )
 from mppi.viz import (
   PLAN_COLOR,
@@ -92,6 +93,9 @@ def make_env(args: argparse.Namespace) -> ManagerBasedRlEnv:
     if sensor.name == "feet_ground_contact":
       assert isinstance(sensor, ContactSensorCfg)
       sensor.history_length = cfg.decimation
+  # Evaluate the nominal robot: drop the robust variants' extra randomization
+  # (mass, gains, motor strength, pushes); the estimators assume nominal mass.
+  cfg.events = {k: v for k, v in cfg.events.items() if not k.startswith("dr_")}
   # Fallen robots stay where they fell; outcomes are recorded here instead.
   cfg.terminations = {}
   onset = DEMO_COURSE.layout(0.0).edge - args.change_before
@@ -232,6 +236,9 @@ def run_mode(
     mppi.reset(cmd.position()[:, 0], cmd.course()[0])
 
   fell = torch.zeros(n, dtype=torch.bool, device=device)
+  # The feet in contact at touch-down, and where they were.
+  touchdown_contact = torch.zeros(n, len(FEET), dtype=torch.bool, device=device)
+  touchdown_feet = torch.full((n, len(FEET), 3), torch.nan, device=device)
   # Calibration runs scale each robot's take-off command by a fixed factor.
   jitter = 1 + args.vz_jitter * (2 * torch.rand(n, device=device) - 1)
   aimed = torch.full((n,), torch.nan, device=device)
@@ -282,7 +289,11 @@ def run_mode(
     vx = m.vx_gain * float(cmd.run_speed[0])
     vz = m.vz_offset + m.vz_gain * float(planned_vz[0])
     vz += m.vz_gravity_gain * (g - NOMINAL_GRAVITY)
-    stop = float(aimed[0]) + vx**2 / (2 * m.brake_efficiency * grid_friction[0] * g)
+    stop = float(aimed[0]) + float(
+      stop_distance(
+        m, torch.tensor(vx), torch.tensor(grid_friction[0]), torch.tensor(g)
+      )
+    )
     edge = float(cmd.course()[0][0])
     return _path(
       x_now,
@@ -436,6 +447,13 @@ def run_mode(
       with torch.no_grad():
         obs, *_ = vec.step(policy(obs))
       fell |= cmd.position()[:, 2] < -0.1
+      now = cmd.landed_now
+      if now.any():
+        found = feet_sensor.data.found
+        assert found is not None
+        feet = robot.data.site_pos_w[:, foot_sites] - env.scene.env_origins[:, None]
+        touchdown_contact[now] = found[now] > 0
+        touchdown_feet[now] = feet[now]
       change_t = torch.where(change.changed & change_t.isnan(), t + dt, change_t)
       left = (cmd.phase != JumpPhase.RUN) & trigger_t.isnan()
       trigger_t = torch.where(left, t + dt, trigger_t)
@@ -506,6 +524,10 @@ def run_mode(
     "change_t": change_t.cpu().numpy(),
     "trigger_t": trigger_t.cpu().numpy(),
     "friction_used": used_friction.cpu().numpy(),
+    # (B, 4) and (B, 4, 3), feet in `FEET` order: in contact at touch-down, and
+    # their positions then, relative to the spawn point like `final_x`.
+    "touchdown_contact": touchdown_contact.cpu().numpy(),
+    "touchdown_feet": touchdown_feet.cpu().numpy(),
     # (T, B, 4): command, speed before and after the step, still running.
     "speed_trace": torch.stack(speed_trace).cpu().numpy(),
     # (T, B, 5): true gravity, trunk and centroidal estimates, the centroidal

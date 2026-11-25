@@ -952,3 +952,165 @@ The first gravity estimate used the trunk's velocity in the momentum balance. Th
 - **At 0.5 m the change comes after the trigger,** so the planner cannot use it. Online's 86% against 75% for the true values most likely comes from the friction estimate reading low, which gives more braking room. Not verified.
 
 **Video:** `logs/mppi/box_jump_late_change_rows.mp4`, with gravity 7 and friction 0.5 changing 1.0 m before the edge. Over 64 robots: fixed 0%, online 100%, true 98%. With fixed values the robot jumps high (vz 1.95 m/s) and overshoots the box. With online or true values it switches to a low, fast jump (about 0.85 m/s up at about 2.9 m/s), lands and stops.
+
+**Why the history policy fails the late change** (2026-11-25; 256 robots each, gravity 7 and friction 0.5 changing 1.0 m before the edge, tracking planner with the whole-robot estimator):
+
+| Policy | Online | True | Misses that slid off the far end | Stop distance after touch-down (median) |
+|---|---|---|---|---|
+| No history | 99% | 99% | 1% | 0.28 m |
+| History | 72% | 45% | 28% (online), 55% (true) | 0.62 to 0.75 m when it succeeds, 1.06 to 1.29 m when it misses |
+
+- **Same approach, different braking.** Both policies reach the edge at about 2.9 to 3.1 m/s, because the change leaves no time to slow down, and both touch down about 6.05 to 6.2 m along. The history policy then brakes far worse on the slippery box and slides off the far end. The box leaves about 0.9 m.
+- **Not the planner or the estimators.** The no-history policy's stop is far shorter than friction × gravity alone allows (about 16 m/s^2 against 3.5), presumably because it lands hard and uses the impact's normal force to brake; not verified.
+- **The planner's braking model** is close for the history policy's misses (1.0 to 1.04 m predicted) but very pessimistic for the no-history policy (1.2 m predicted, 0.28 m actual).
+- **Fixes:**
+  - **Policy, the real fix:** train the history policy to stop faster after landing, for example a stronger penalty on forward speed after touch-down.
+  - **Planner:** fit braking against landing speed for each policy, which helps only when the change comes early enough to slow down.
+- **Video:** `logs/mppi/box_jump_late_change_braking_rows.mp4`, the two policies with the true values, one above the other.
+
+### 6.11 Robust jump policies: targeted training and more randomization
+
+**Status:** `done` · 2026-11-25 (the history variant still lands short in a few percent of hard cases, see below)
+
+cpw asked for much more domain randomization to prevent failures like the history policy's late-change braking. That case (gravity 7, friction 0.5, change 1.0 m before the edge) was already inside the training distribution; the policy had not learned the skill. The robust variants therefore target the skill and add moderate randomization.
+
+- **Tasks:** `Mjlab-BoxJump-Unitree-Go1-Robust` and `Mjlab-BoxJump-Unitree-Go1-History-Robust`, trained 8,000 iterations each, against 3,000 before.
+- **Stopping:** a new penalty on squared forward speed after touch-down (`speed_after_landing`, weight -2).
+- **Harder changes:**
+  - the change now comes 0.5 to 3.5 m before the edge, in 60% of episodes;
+  - a third of changes draw low gravity (7 to 8.5) with low friction (0.35 to 0.6);
+  - friction goes down to 0.35.
+  - In a check, 53% of new gravity draws were below 8.5 and 57% of new friction draws below 0.6.
+- **More randomization, named `dr_*`:**
+  - trunk mass ×0.8 to ×1.35, about -8% to +15% of the whole robot, like a payload;
+  - PD gains ±10%;
+  - motor torque limits ×0.8 to ×1.1;
+  - small pushes every 1.5 to 3 s (±0.3 m/s, ±0.3 rad/s).
+  - Evaluations drop the `dr_*` events and run the nominal robot, so results stay comparable and the estimators' nominal mass holds.
+- **After training** (`scratchpad robust_pipeline.sh`, log in `logs/mppi/robust_pipeline.txt`): calibrate both, run the adaptation test, and run the late-change hard case with braking statistics and videos.
+
+**Braking model, refitted** (2026-11-25, while the robust policies train): the planner's braking was friction × gravity × an efficiency. That was far off for the no-history policy: 1.2 m predicted against 0.28 m actual in the late-change case.
+
+- **New model** (`stop_distance` in `mppi/jump_planner.py`): stop = offset + max(v - v_impact, 0)^2 / (2 × efficiency × friction × gravity). The landing impact takes away up to `brake_impact_speed`, and friction brakes the rest.
+- **Fit:** `fit_jump_model.py` fits it by quantile regression to the 80th percentile of stopping distance, so the planner does not count on its best stops. Efficiency is kept at least 0.3 so it extrapolates sensibly to faster landings.
+- **On the old no-history policy's data:** median stop 0.22 m; the new model predicts 0.27 to 0.30 m and covers 80% of stops, against 0.58 m for the old model.
+- **Defaults** (no impact, no offset) reproduce the old model, so older `jump_model.json` files still work. A unit test checks that defaults give the old formula and that the fit recovers a known impact speed.
+
+**Results** (2026-11-25, 8,000 iterations each, calibrated with the new braking model; checkpoints `logs/rsl_rl/go1_box_jump_robust/2026-11-25_01-56-40/` and `logs/rsl_rl/go1_box_jump_history_robust/2026-11-25_01-56-10/`, `model_7999.pt`):
+
+- **Calibration:**
+
+  | | No history, robust | History, robust |
+  |---|---|---|
+  | Take-off vz fit, R^2 | 0.95 | 0.76 |
+  | Trigger to lift-off | 0.115 s | 0.121 s |
+  | Touch-down past the point-mass flight (spread) | -0.143 m (0.081 m) | -0.190 m (0.098 m) |
+  | Braking fit | impact takes 1.45 m/s over 0.18 m, then 0.91 of friction × gravity | impact 0.02 m/s over 0.09 m, then 2.42 of friction × gravity |
+  | Median stop | 0.15 m (1,023 of 1,024 stopped) | 0.19 m (926 of 1,024 stopped) |
+
+- **Adaptation test** (`eval_adaptation`, 256 robots, gravity 7 to 12, friction 0.4 to 1.0; success with fixed / online / true values):
+
+  | Change before the edge | No history, old (6.10) | No history, robust | History, robust |
+  |---|---|---|---|
+  | 2.5 m | 73 / 100 / 100% | 95 / 100 / 100% | 83 / 100 / 99% |
+  | 1.5 m | 71 / 100 / 100% | 90 / 100 / 100% | 78 / 100 / 100% |
+  | 1.0 m | 70 / 99 / 100% | 86 / 100 / 100% | 80 / 99 / 97% |
+  | 0.5 m | 75 / 86 / 75% | 96 / 94 / 96% | 86 / 82 / 86% |
+
+- **Late-change hard case** (gravity 7, friction 0.5, change 1.0 m before the edge, 256 robots). "Slid off" landed on the box and slid off its far end; "short" touched down with the trunk less than 0.5 m past the edge and did not end on the box. Stops are from touch-down to the final position.
+
+  | Policy | Values | Success | Slid off | Short | Stop, median / 90th pct |
+  |---|---|---|---|---|---|
+  | No history, old | online | 99.2% | 0.8% | 0% | 0.28 / 0.47 m |
+  | No history, old | true | 99.2% | 0.8% | 0% | 0.29 / 0.45 m |
+  | No history, robust | online | **100%** | 0% | 0% | 0.24 / 0.32 m |
+  | No history, robust | true | **100%** | 0% | 0% | 0.23 / 0.32 m |
+  | History, old | online | 71.9% | 27.0% | 1.2% | 0.69 / 1.15 m |
+  | History, old | true | 45.3% | 38.7% | 16.0% | 1.09 / 1.51 m |
+  | History, robust | online | 96.1% | 0% | 3.9% | 0.41 / 0.88 m |
+  | History, robust | true | 93.0% | 0% | 7.0% | 0.60 / 1.03 m |
+
+  The "short" column is an artifact of the touch-down bug described below: with touch-down detection fixed, every failure of the robust history policy slid off the far end. With fixed values (64 robots, video runs): 25% for the robust no-history policy and 19% for the robust history policy, against 0% for the old policies. Videos: `logs/mppi/box_jump_late_change_robust_rows.mp4` and `logs/mppi/box_jump_late_change_history_robust_rows.mp4`.
+
+- **What it means:**
+  - **The no-history robust policy is the one to use.** It lands more precisely (5th to 95th percentile of touch-down 0.48 to 0.64 m past the edge, against 0.40 to 0.69 m before) and stops in under a third of a metre in 90% of the hard cases.
+  - **Targeted training improved the history policy's braking** (27 to 39% slid off before, 4 to 7% now), but did not fix it; see the touch-down bug below for why this first looked like landing short.
+  - **The fixed-values baseline got much stronger** in the random test (70 to 75% before, 86 to 96% now). A precise landing and a short stop leave enough of the 1 m box to absorb the error. Adaptation still matters in the hard case (25% fixed against 100% online), so the demo should show the hard case, and a paper table should report hard cases separately.
+
+
+**The history policy's short landings were a touch-down detection bug** (2026-11-25). A new diagnostic in `run_box_jump` records which feet touch first and where (`touchdown_contact`, `touchdown_feet` in the saved results).
+
+- **What happened:** in the hard case, a hind foot of the robust history policy scraped the take-off box's edge just after lift-off in 41% of jumps with online values and 71% with true values. The command counted any foot contact in flight as the touch-down. So over the gap:
+  - the phase switched to landed, and the commanded forward speed dropped to 0 in mid-air;
+  - in training, the speed-after-landing penalty applied in flight after a scrape.
+- **Every failure** had this signature: one hind foot (RL) in contact at 0.08 m before to 0.0 m past the edge, the trunk 0.2 to 0.3 m past the edge, the front feet 0.4 to 0.7 m above the box tops. The robust no-history policy scraped in 2% of jumps.
+- **Fix:** a foot in contact ends the flight only if it is more than 5 cm past the edge (`JumpCommandCfg.touchdown_past_edge`). `tests/test_box_jump.py` checks that feet on the take-off box keep the phase at flight.
+- **Where the no-history robust policy touches down:** hind feet first in 96 to 98% of jumps, at 0.48 to 0.51 m past the edge. That is the landing box's front corner, since the box starts at 0.5 m. The planner aims the trunk 0.05 m past the start of the box (`front_margin`), and the hind feet trail it by a few centimetres.
+
+**The braking fit was unstable; calibration now adds a run with the demo's planner** (2026-11-25).
+
+- **Symptom:** refitting the same robust no-history policy gave a braking efficiency of 0.91, then 0.48, then 0.39. With 0.48 the tracking planner aimed the trunk at 0.37 to 0.41 m past the edge in the hard case, before the box (it starts at 0.5 m). The robot still succeeded only because it flew further than planned.
+- **Cause:** calibration runs the grid planner, whose run-ups are slow: landings at 1.55 to 2.1 m/s. The tracking MPPI lands at 2.4 to 2.9 m/s in the hard case, so the fit extrapolated, and its efficiency was barely constrained.
+- **The policy's real stops hardly depend on friction.** For the robust no-history policy at about 2.7 m/s, the 80th percentile of stop distance is 0.22 to 0.27 m whether friction × gravity is 2 or 13 (1,024-robot grid run). The landing impact takes most of the speed. Every fit on the slow data predicted 0.47 to 0.73 m there.
+- **Fix:** `fit_jump_model` now does two runs:
+  1. the grid-planner run, which fits everything;
+  2. a second run with the tracking MPPI, using the first fit, the true values and a late change (1.0 m before the edge, `--braking-change-before`).
+  
+  Braking is fitted on the stops of both, covering landings at 1.6 to 2.8 m/s. `--save-raw` keeps both runs' outcomes.
+- **Result:** two refits gave impact 1.41 and 1.26 m/s, efficiency 4.0 and 2.6. For a 3 m/s landing at friction 0.5 and gravity 7, they predict 0.28 and 0.34 m, against a real 80th percentile of 0.27 m (the old fits predicted 0.54 to 1.01 m). The planner now aims 0.64 to 0.66 m past the edge in the hard case, inside the box, and the robot lands at 0.57 m (99 to 100% success with online or true values).
+
+**Final numbers for the robust no-history policy** (2026-11-25, touch-down fix and two-run calibration; `logs/mppi/final_robust.txt`):
+
+| Test | Fixed values | Online estimates | True values |
+|---|---|---|---|
+| Adaptation test, change 2.5 / 1.5 / 1.0 / 0.5 m before the edge | 84 / 81 / 78 / 86% | 100 / 100 / 100 / 93% | 100 / 100 / 100 / 86% |
+| Hard case (gravity 7, friction 0.5, 1.0 m), 256 robots | 18% | **100%** | 100% |
+| Grid: gravity 6.5 to 12.5, friction 0.35 to 1.0, change 1.0 m, 1,024 robots | 75% | **100%** | 99.9% |
+
+- **Grid** (`logs/mppi/box_jump_grid_robust_final.png`): with fixed values, success falls only at low gravity. From 6.5 to 8 it is 24 to 58%, lowest on slippery ground; the robot flies too far and slides off. At high gravity the fixed planner still succeeds: the robot falls short, and this policy climbs onto the box from a short landing.
+- **For a stronger demo**, the box could shrink or gravity could go lower; the failure region of fixed values is all at low gravity. cpw to decide.
+- **Video:** `logs/mppi/box_jump_late_change_robust_final_rows.mp4`.
+
+**The robust history policy: braking with a heavy tail** (2026-11-25).
+
+- **Most of its stops are as short as the no-history policy's** (median 0.2 to 0.3 m). But in 4 to 20% of hard cases it keeps running after touch-down: 1 to 3 m at 1.5 to 2.2 m/s for 0.2 to 0.5 s, then off the far end. Its forward speed does not drop after the stop command, whereas successful robots are below 1 m/s within 0.1 to 0.2 s.
+- **How often depends on the plan.** It happens more after faster or higher jumps. In calibration, 10.9% of jumps with take-off vz above 1.7 m/s slid off, against 0% below. The no-history policy slid off 0% at every height.
+- **With the two-run calibration it does worse in the hard case:** 78% online and 85% true, against 95% and 93% with the earlier calibration. The new braking fit sees little effect of speed, so the planner keeps 3.1 m/s and jumps higher (vz command 1.34 against 1.15). The earlier fit happened to overstate the effect of speed, which slowed the run-up.
+- **Planner-side fixes do not help**, because the tail is the policy's:
+  - a larger front margin (0.15 or 0.25 m): 96 / 93-94%;
+  - a 10x stronger preference for low jumps (`vz_cost` 0.3): 77 / 78%;
+  - counting slide-offs as censored stops in the braking fit: they are 4% of the data, below the 80th percentile, so the fit barely moves.
+- **Fine-tunes from `model_7999.pt`** (2,000 iterations each): one with the touch-down fix only, one also with `speed_after_landing` at -6 instead of -2. Results below.
+
+**Fine-tune results** (hard case, 512 robots, two-run calibration; success with online / true values; stop distance from touch-down):
+
+| History policy | Calibration jumps that did not stop on the box | Hard case | Off the far end | Stop, median / 95th pct (online) |
+|---|---|---|---|---|
+| Robust, `model_7999.pt` | 4.6% | 78.3 / 84.6% | 20.5 / 14.6% | 0.48 / 1.54 m |
+| + touch-down fix, 2,000 iterations (`2026-11-25_04-45-24_touchdown_fix/model_9998.pt`) | 9.0% | 88.7 / 95.3% | 11.3 / 4.7% | 0.34 / 1.35 m |
+| + touch-down fix and stop penalty -6, 2,000 iterations (`2026-11-25_04-50-24_stop6/model_9998.pt`) | 1.4% | **95.5 / 92.8%** | 4.5 / 7.2% | 0.46 / 0.75 m |
+| No-history robust, for reference | 0.0% | 100 / 100% | 0 / 0% | 0.28 / 0.47 m |
+
+- **The stronger stop penalty shortened the tail** (95th percentile 1.54 to 0.75 m) but lengthened the median stop. 5 to 7% still slide off.
+- **The touch-down-fix fine-tune tracks take-off vz worse:** calibration R^2 0.32, against 0.72 before.
+- **Why the history policy stops worse:** the no-history policy takes 1.3 to 1.5 m/s off at the landing impact itself (fitted impact speed), presumably by pressing hard into the box, so it barely depends on friction. The history policy lands softer (fitted impact 0 to 1.1 m/s) and then slides. At friction 0.5 and gravity 7, friction alone needs 1.2 m to stop from 2.9 m/s, longer than the box allows.
+- **A reward that targets the impact** might teach it: for example, forward speed lost within 0.1 s of touch-down. Not tried.
+- **The stop-penalty fine-tune is the final history policy here.**
+
+**Final numbers for the history policy** (stop-penalty fine-tune, recalibrated; `logs/mppi/final_history_robust.txt`):
+
+| Test | Fixed values | Online estimates | True values |
+|---|---|---|---|
+| Adaptation test, change 2.5 / 1.5 / 1.0 / 0.5 m before the edge | 94 / 93 / 88 / 91% | 100 / 99 / 99 / 91% | 100 / 99 / 99 / 91% |
+| Hard case (gravity 7, friction 0.5, 1.0 m), 256 robots | 30% | 91% | 92% |
+| Grid: gravity 6.5 to 12.5, friction 0.35 to 1.0, change 1.0 m, 1,024 robots | 83% | 97.7% | 97.6% |
+
+- **Recalibrating changed the hard-case result** from 95.5 / 92.8% (512 robots, first calibration) to 91.0 / 91.8% (256 robots). The calibration runs are not repeatable: the braking fit came out as impact 1.06 m/s with efficiency 3.4, then 0.28 m/s with 7.2. Their touch-down spread is also large: 0.22, then 0.29 m.
+- **Every failure is the same:** a correct landing, then a slide off the far end. In the video `logs/mppi/box_jump_late_change_history_robust_final_rows.mp4`, the online row shows one.
+- **Conclusion for now:** the no-history robust policy with online estimates is the method to show. The history policy does not need the estimators to be close to the true values (online about equals true), but its braking is weaker.
+
+**One more try: reward the impact itself** (2026-11-25). New reward term `landing_brake`: once, 5 policy steps (0.1 s) after touch-down, the share of the touch-down forward speed shed since. The command now counts `landed_steps` for it. It is in the robust configs with weight 0, so it is off unless set.
+
+- **Run:** fine-tuned the stop-penalty policy for 2,000 more iterations, weight 150 (`2026-11-25_05-41-14_brake150/model_11997.pt`). The reward rose only from 0.41 to 0.43 per episode.
+- **Result: worse.** Hard case 85.9 / 91.2% (online / true), against 95.5 / 92.8%. In calibration 9.1% of jumps did not stop on the box, against 1.4%. Take-off vz tracking fell to R^2 0.38.
+- **The median stop got shorter** (0.13 m) but the tail did not. The stop-penalty fine-tune stays the final history policy.

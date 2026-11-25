@@ -29,7 +29,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from mppi.jump_planner import NOMINAL_GRAVITY, JumpModelCfg, Reference
+from mppi.jump_planner import (
+  NOMINAL_GRAVITY,
+  JumpModelCfg,
+  Reference,
+  stop_distance,
+)
 
 
 @dataclass(kw_only=True)
@@ -211,7 +216,7 @@ class JumpMppi:
     ).clamp(min=0.0)
     flight_time = 2 * liftoff_vz / g
     touchdown_x = liftoff_x + liftoff_vx * flight_time + m.flight_offset
-    stop_x = touchdown_x + liftoff_vx.square() / (2 * m.brake_efficiency * mu * g)
+    stop_x = touchdown_x + stop_distance(m, liftoff_vx, mu, g)
 
     short = pad_start + m.front_margin - touchdown_x
     long = stop_x - (pad_end - m.back_margin)
