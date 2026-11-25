@@ -771,3 +771,143 @@ cpw chose this split: the policy runs, takes off on command with a commanded ver
 A second run with 128 robots gave 66%, 76% and 74%, so these early numbers are noisy. The calibration on that checkpoint showed why: the policy ignored the take-off command (R^2 0.02).
 
 **The flaw, fixed:** the first training counted the running gait's brief moment with all feet in the air as a lift-off, so the policy was never pushed to follow the commanded take-off speed (median error 1.3 m/s). A lift-off now needs three steps in the air with the trunk rising at 0.25 m/s or more, and the take-off reward is wider. In the retrained no-history policy the error is 0.30 m/s by iteration 200.
+
+**After removing the jump flag** (no-history policy at iteration 300 of 3,000, calibrated planner, 2026-11-24):
+
+- **Calibration:** the policy follows the take-off command better than the flawed one did, but not fully: actual vertical speed = 0.62 + 0.65 × commanded (R^2 0.30). From where it actually takes off, touch-down is within about 6 cm of the flight model plus a fixed -16 cm offset. The fitted braking, 1.11 × friction × gravity, is optimistic: landing impacts press the feet harder than the robot's weight.
+
+| Case (256 or 64 robots) | Fixed values | Online estimates | True values |
+|---|---|---|---|
+| Full range: gravity 7 to 12, friction 0.4 to 1.0 (256) | 49% | 84% | 74% |
+| Gravity 7.5, friction 0.8 (64) | 0% | 72% | 45% |
+| Gravity 7, friction 0.5 (64) | 0% | 2% | 2% |
+
+Share that land and stay on the box.
+
+- **Fixed values fail as expected:** the planner believes gravity is 9.81, so the robot overshoots the box.
+- **Online beats the true values,** because the friction estimate reads low and makes the planner gentler. Given the true friction, the optimistic braking model plans landings the robot cannot stop from. The braking model needs a conservative fit.
+- **Gravity 7 with friction 0.5 is beyond this early policy:** it lands on target, then bounces and slides off.
+- **Video bug, fixed:** the renderer drew two neighbouring robots on top of robot 0, because every robot shares one course. Videos recorded before the fix (`box_jump_800_*`) show other robots' falls; their statistics are unaffected. The runner now sets `max_extra_envs=0`. Comparison videos are stacked in rows (cpw's preference).
+
+### 6.7 MPPI for the jump
+
+**Status:** `built and working` · 2026-11-24
+
+cpw asked for the jump to be planned by MPPI rather than the grid search.
+
+- **What `mppi/jump_mppi.py` plans:** for every robot at once, a run-up speed profile over 4.5 s (6 knots), a trigger time and a take-off speed. The update is the same as in `mppi/core.py`, batched over robots: noise around the current plan, costs normalized by their spread, softmax weights, 3 iterations, and a warm start shifted by the time elapsed. It replans every 0.1 s and takes about 60 ms for 256 robots on the shared GPU.
+- **Rollout model** (calibrated):
+  - **Run-up:** the speed settles at an offset and gain of the command (0.83 + 0.65 × command), no faster than the top acceleration (2.2 m/s^2) or traction (friction × gravity).
+  - **Take-off:** push-off for 0.12 s, then lift-off at the calibrated vertical speed (-0.12 + 1.12 × command, R^2 0.80).
+  - **Flight:** ballistic under the estimated gravity, with touch-down 0.19 m short of the point-mass prediction.
+  - **Braking:** 0.89 × friction × gravity, the 20th percentile, so the planner does not count on the robot's best stops.
+- **Cost:** touch-down outside the landing window or lift-off past the edge (20 per metre), a reward for margin up to 0.25 m, a small cost on take-off speed, and smoothness of the speed profile.
+- **Videos:** they always draw the sampled plans coloured by cost, the chosen plan (cyan) and the path driven (white). The chosen plan stays frozen after the trigger, to compare prediction with reality.
+- **Calibration fixes:**
+  - the run-up speed has no real lag; the earlier first-order lag fit was meaningless;
+  - the speed trace now records the command the policy acted on;
+  - braking uses a low percentile.
+
+**Results** (no-history policy at iteration 900, 256 robots over gravity 7 to 12 and friction 0.4 to 1.0, changed 2.5 m before the edge):
+
+| Planner | Fixed values | Online estimates | True values |
+|---|---|---|---|
+| MPPI | 82% (0.11 m) | 100% (0.09 m) | 100% (0.07 m) |
+| Grid | 56% (0.18 m) | 97% (0.19 m) | 95% (0.20 m) |
+
+Share that land and stay on the box (median touch-down error).
+
+Hard case, gravity 7 and friction 0.5, 64 robots, MPPI: 0% with fixed values, 100% with online estimates, 100% with the true values. With the online or true values, MPPI runs fast early, slows to about 1 m/s before the edge, jumps high (2 m/s up), lands and stops. The grid search could not plan a slow-down and managed 2% in this case. Video: `logs/mppi/box_jump_mppi_hard_rows.mp4`.
+
+**Final policies** (3,000 iterations each, calibrated, MPPI, 512 robots over gravity 7 to 12 and friction 0.4 to 1.0 changed 2.5 m before the edge; 2026-11-24):
+
+| Policy | Fixed values | Online estimates | True values |
+|---|---|---|---|
+| No history | 73% (23% fall) | 99.0% | 99.2% |
+| History (0.5 s) | 87% (1% fall) | 99.2% | 99.2% |
+
+Share that land and stay on the box.
+
+- **With the planner adapting,** both policies land on the box nearly every time.
+- **Without it,** the policy with history copes much better (87% against 73%, and 1% falls against 23%). This is the four-way comparison: planner adaptation dominates, and policy history helps where the planner does not adapt.
+- **Hard case, gravity 7 and friction 0.5 (64 robots):**
+  - no history: 2%, 97% and 94% (fixed, online, true values);
+  - history: 8%, 92% and 97%.
+- **Calibration of the final policies:**
+  - no history: take-off vertical speed -0.13 + 1.07 × command (R^2 0.85), braking 1.09 × friction × gravity at the 20th percentile;
+  - history: 0.21 + 0.88 × command (R^2 0.70), braking 1.13.
+- **Videos:** `logs/mppi/box_jump_final_hard_rows.mp4` and `box_jump_final_history_hard_rows.mp4`. They now use a chase camera (behind and to the left of the robot), so the planned jump at the end of the course is in view from the first frame. A speed-along-the-course chart shows the sampled speed profiles, the chosen one and the speed actually run. Before the change, the side camera followed the robot too closely to show the plan's jump until about 2 m from the edge, and the sampled plans' run-ups all overlapped on one line.
+
+### 6.8 Reference + short-horizon MPPI, and how fast it adapts
+
+**Status:** `built and measured` · 2026-11-24
+
+cpw found the long-horizon visualization odd: the plan showed the jump from the first step. DIAL-MPC and MuJoCo MPC, checked in their source, both plan over 0.25 to 0.5 s with running costs only. A time-indexed target or reference, set from above, carries the long-term structure:
+- DIAL-MPC moves the body and foot targets 0.4 m every 1 s;
+- MuJoCo MPC's backflip follows a hand-computed height and orientation reference, with g fixed at 9.81.
+
+cpw chose the same structure, since the project's focus is fast adaptation.
+
+- **`ReferencePlanner` (`mppi/jump_planner.py`):** a global grid over take-off speed and take-off vertical speed, recomputed every 0.1 s from the latest gravity and friction estimates. It counts only take-off speeds the robot can still reach by speeding up or slowing down. It outputs the take-off point and speed, the vertical speed, the landing target, and an approach-speed curve.
+- **`JumpTrackingMppi` (`mppi/jump_mppi.py`):** MPPI over 1 s that tracks the reference. It may put the jump beyond its horizon.
+  - Its cost tracks the reference speed and the reference position over time. It also penalizes waiting when the reference jumps within the horizon, puts the trigger at the reference's time and the lift-off at its point, and keeps the take-off speed near the reference while landing inside the window.
+  - A first version without the time-indexed terms never jumped: waiting cost nothing as long as the robot never reached the take-off point, so it slowed down and stopped. That is why the other projects index their targets by time.
+- **Videos:** a short predicted path at first, the reference's take-off line and landing spot in purple, and the jump arcs only once the jump enters the horizon. `logs/mppi/box_jump_tracking_hard_rows.mp4`.
+
+**Adaptation test** (`mppi/eval_adaptation.py`, `logs/mppi/eval_adaptation.txt`): no-history final policy, 256 robots, gravity 7 to 12 and friction 0.4 to 1.0, changed at a line closer and closer to the edge.
+
+| Change before edge | Planner | Fixed | Online | True | Gravity error at trigger | Change to trigger |
+|---|---|---|---|---|---|---|
+| 2.5 m | long MPPI | 73% | 100% | 100% | 0.20 m/s^2 | 0.66 s |
+| 2.5 m | tracking | 63% | 100% | 100% | 0.19 | 0.62 s |
+| 1.5 m | long MPPI | 74% | 96% | 100% | 0.63 | 0.26 s |
+| 1.5 m | tracking | 65% | 98% | 100% | 0.54 | 0.30 s |
+| 1.0 m | long MPPI | 71% | 86% | 98% | 1.01 | 0.10 s |
+| 1.0 m | tracking | 65% | 85% | 98% | 0.86 | 0.14 s |
+| 0.5 m | long MPPI | 77% | 79% | 77% | 1.34 | -0.06 s |
+| 0.5 m | tracking | 70% | 77% | 69% | 1.27 | -0.04 s |
+
+- **The two planners adapt equally fast.** Both replan every 0.1 s.
+- **The estimator is the bottleneck.** With the true values both stay at 98 to 100% down to 1.0 m before the edge, 0.1 s before the trigger. With the online estimates success falls to 85%, because the gravity estimate (0.3 s time constant) is still about 1 m/s^2 off at the trigger.
+- **At 0.5 m the change comes after the trigger,** so no planner can help: about 75% whatever the source.
+- **Next:** a faster gravity estimate, for example detecting the step change and resetting the filter.
+
+### 6.9 DIAL-MPC on the box-jump course
+
+**Status:** `built, first results` · 2026-11-24
+
+cpw asked to see DIAL-MPC itself, kept out of `mppi/`: `dial/core.py` and `dial/box_jump.py`.
+
+- **Planner (`dial/core.py`):** the authors' algorithm from their `dial_core.py`.
+  - Sampling: 2,048 samples over a 0.4 s horizon (20 control steps of 0.02 s) with 6 nodes; noise grows 0.9x per node towards the end of the horizon and shrinks 0.5x per round.
+  - Rounds: 10 on the first step, then 2 per step.
+  - Update: softmax weights at temperature 0.05 on rewards relative to the current plan, divided by their spread; the first node is fixed and the plan shifts one step after each control step.
+  - Our only change: nodes joined linearly, not by a quadratic spline.
+- **Task (`dial/box_jump.py`):** joint targets planned directly (±0.8 rad around standing), with no learned policy.
+  - The rollouts run in a second, batched copy of the course with the planner's belief about gravity and foot friction (fixed, online estimates, or true).
+  - Rewards in DIAL's style, as means over the horizon: a body target moving along the course at 1.5 m/s and stopping over the landing box, height, upright, yaw, forward speed, a trot foot-height schedule before the gap, feet on the landing box, and penalties for feet or trunk below the box tops.
+- **Planning physics step matters.** With DIAL's 0.02 s step against our robot simulated at 0.005 s, the robot lost its footing within 2 s, before the gap, whatever the target speed. With 0.01 s (two physics steps per control step) it runs the course. The authors plan and simulate with the same 0.02 s model.
+- **First result,** gravity 7 and friction 0.5 from 2.5 m before the edge, one robot per source:
+  - fixed values: jumps short and tumbles off the front edge of the box;
+  - online estimates and true values: both land on the box and stop.
+  - Planning takes 118 ms per 20 ms control step (2,049 worlds), about 6x slower than real time.
+  - Video: `logs/dial/box_jump_rows.mp4`. More seeds in `logs/dial/seeds.txt`.
+
+**With 5 seeds** (seeds 0 to 4, same hard case): fixed 0/5, online 1/5, true values 3/5 land and stay on the box. Most misses end 5.8 to 5.95 m along: short of the box or on its front edge (the gap is 5.5 to 6.0 m), and 3 of the online misses fell. Seed 0, the video, was a lucky run for the online case. In the same case the MPPI + RL planner lands 100% of 64 robots with online estimates.
+
+The online estimators were built around the RL policy's gait and may read DIAL's gait worse; this has not been checked.
+
+Still to try for DIAL: a 0.005 s planning step (matching the robot exactly, about 2x slower), more rounds or samples per step, and a stage-based jump reward like the authors' sequential jump.
+
+**Horizon, 10 seeds each** (gravity 7, friction 0.5 from 2.5 m before the edge; `logs/dial/tune_*_10seeds.txt`):
+
+| Horizon | Fixed | Online | True | Planning per 20 ms step |
+|---|---|---|---|---|
+| 0.4 s (DIAL's default) | 0/10 (1 fell) | 4/10 (4 fell) | 10/10 | about 120 ms |
+| 0.8 s (10 nodes) | 1/10 (4 fell) | 10/10 | 10/10 | about 250 ms |
+
+- **0.4 s is too short for this task** (cpw's suspicion). At 1.3 m/s it sees about 0.5 m ahead. At lift-off the touch-down sits at the very end of the horizon and the braking beyond it, so the plan cannot prepare for landing and stopping on a 1 m box.
+- **With 0.8 s, online estimates are as good as the true values.** Fixed values still fail.
+- **Cost:** about 12x slower than real time, against MPPI + RL planning 256 robots in about 60 ms per 0.1 s.
+- **The authors' 0.4 s horizon** was for standing hops of 0.4 m every 1 s, with no run-up or braking.
+- **Video:** `logs/dial/box_jump_h08_rows.mp4`. In its seed the fixed-values robot also landed, which is the 1-in-10 exception.

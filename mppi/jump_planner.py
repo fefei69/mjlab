@@ -48,7 +48,13 @@ class JumpModelCfg:
   """Touch-down beyond the point-mass prediction, m (the trunk is not the
   centre of mass, and the legs reach)."""
   run_accel: float = 2.0
-  """The run-up command's ramp, m/s^2, as in the jump command."""
+  """Fastest forward acceleration on a grippy surface, m/s^2."""
+  speed_gain: float = 1.0
+  speed_offset: float = 0.0
+  """Steady running speed = offset + gain * commanded, m/s."""
+  speed_tau: float = 0.15
+  """Time constant of reaching that speed, s. Short: the policy follows the
+  command's own ramp closely (measured, not fitted)."""
   brake_efficiency: float = 0.5
   """Braking deceleration as a share of friction * gravity."""
   front_margin: float = 0.05
@@ -115,7 +121,8 @@ class JumpPlanner:
     )
     room = (takeoff_x - x).clamp(min=0.0)
     reachable = (speed.square() + 2 * accel * room).sqrt()
-    vx = cfg.vx_gain * torch.minimum(run_speed, reachable)
+    steady = cfg.speed_offset + cfg.speed_gain * run_speed
+    vx = cfg.vx_gain * torch.minimum(steady, reachable)
     vz = (
       cfg.vz_offset
       + cfg.vz_gain * vz_cmd
@@ -240,3 +247,97 @@ class FrictionEstimator:
   def reset(self, env_ids: torch.Tensor | None = None) -> None:
     ids = slice(None) if env_ids is None else env_ids
     self.friction[ids] = self.prior
+
+
+@dataclass
+class Reference:
+  """The jump to aim for, per robot (B,): where to lift off, at what speed, how
+  hard, and the approach-speed curve that gets there."""
+
+  takeoff_x: torch.Tensor
+  speed: torch.Tensor
+  """Forward speed at the trigger and lift-off."""
+  vz: torch.Tensor
+  """Commanded take-off vertical speed."""
+  cruise: torch.Tensor
+  """Speed cap before the approach curve takes over."""
+  accel: torch.Tensor
+  """Acceleration of the approach curve."""
+  landing_x: torch.Tensor
+  margin: torch.Tensor
+
+  def speed_at(self, x: torch.Tensor) -> torch.Tensor:
+    """Reference speed at positions `x`, (B, ...): hold the cruise speed, then
+    change speed at a constant rate to reach the take-off speed at lift-off."""
+    shape = (-1,) + (1,) * (x.dim() - 1)
+    left = (self.takeoff_x.view(shape) - x).clamp(min=0.0)
+    curve = (self.speed.view(shape).square() + 2 * self.accel.view(shape) * left).sqrt()
+    return torch.minimum(self.cruise.view(shape), curve)
+
+
+class ReferencePlanner:
+  """A global search for the jump to aim for, from each robot's current state.
+
+  Candidates are the forward speed at take-off and the take-off vertical speed.
+  The trunk lifts off just before the edge. A speed counts only if the robot can
+  still reach it by then, speeding up or slowing down no faster than its top
+  acceleration and its traction allow. The rest is the grid planner's model: a
+  ballistic flight under the estimated gravity, and braking under the estimated
+  friction. Recomputed from scratch at every call, so a new gravity or friction
+  estimate changes the reference at once.
+  """
+
+  def __init__(
+    self,
+    cfg: JumpModelCfg | None = None,
+    speeds: tuple[float, float, int] = (0.6, 3.0, 49),
+    vzs: tuple[float, float, int] = (0.5, 2.0, 31),
+    device: str = "cpu",
+  ) -> None:
+    self.cfg = cfg or JumpModelCfg()
+    grid = torch.cartesian_prod(
+      torch.linspace(*speeds, device=device), torch.linspace(*vzs, device=device)
+    )
+    self._v, self._vz = grid[:, 0], grid[:, 1]
+
+  def plan(
+    self,
+    x: torch.Tensor,
+    speed: torch.Tensor,
+    course: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    gravity: torch.Tensor,
+    friction: torch.Tensor,
+  ) -> Reference:
+    m = self.cfg
+    edge, pad_start, pad_end = (c[:, None] for c in course)
+    g, mu = gravity[:, None], friction[:, None]
+    v_now = speed.clamp(min=0.0)[:, None]
+    takeoff_x = edge - m.takeoff_before_edge
+    accel = torch.minimum(torch.full_like(mu, m.run_accel), m.brake_efficiency * mu * g)
+    room = (takeoff_x - v_now * m.push_time - x[:, None]).clamp(min=0.0)
+    lowest = (v_now.square() - 2 * accel * room).clamp(min=0.0).sqrt()
+    highest = (v_now.square() + 2 * accel * room).sqrt()
+    v, vz_cmd = self._v[None], self._vz[None]
+    vx = m.vx_gain * v
+    vz = (
+      m.vz_offset + m.vz_gain * vz_cmd + m.vz_gravity_gain * (g - NOMINAL_GRAVITY)
+    ).clamp(min=0.0)
+    landing_x = takeoff_x + vx * 2 * vz / g + m.flight_offset
+    stop_x = landing_x + vx.square() / (2 * m.brake_efficiency * mu * g)
+    margin = -torch.maximum(
+      pad_start + m.front_margin - landing_x, stop_x - (pad_end - m.back_margin)
+    )
+    unreachable = torch.relu(lowest - v) + torch.relu(v - highest)
+    score = margin - m.vz_cost * vz_cmd - 10.0 * unreachable
+    best = score.argmax(dim=1)
+    rows = torch.arange(len(x), device=x.device)
+    take = self._v[best]
+    return Reference(
+      takeoff_x=takeoff_x[:, 0],
+      speed=take,
+      vz=self._vz[best],
+      cruise=torch.maximum(take, speed.clamp(min=0.0)),
+      accel=0.8 * accel[:, 0],
+      landing_x=landing_x[rows, best],
+      margin=margin[rows, best],
+    )

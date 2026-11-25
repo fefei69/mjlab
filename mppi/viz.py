@@ -64,6 +64,15 @@ def draw_path(
       vis.add_sphere(point, 2.2 * radius, color)
 
 
+def draw_polyline(
+  vis: DebugVisualizer, points: np.ndarray, radius: float, color: Rgba
+) -> None:
+  """Draw a polyline through (N, 3) points."""
+  for a, b in zip(points[:-1], points[1:], strict=True):
+    if np.linalg.norm(b - a) > 1e-4:
+      vis.add_cylinder(a, b, radius, color)
+
+
 def draw_rollouts(
   vis: DebugVisualizer, paths: np.ndarray, costs: np.ndarray, z: float, radius: float
 ) -> None:
@@ -149,3 +158,72 @@ class Hud:
     if self._note:
       draw.text((x, y), self._note, font=self._font, fill=self.MUTED)
     return np.asarray(Image.alpha_composite(image, panel).convert("RGB"))
+
+
+Curve = tuple[np.ndarray, np.ndarray]
+
+
+def draw_speed_panel(
+  frame: np.ndarray,
+  samples: Sequence[Curve],
+  costs: np.ndarray | None,
+  chosen: Curve | None,
+  actual: Curve,
+  edge: float,
+  box: tuple[float, float],
+  x_max: float,
+  v_max: float = 3.0,
+  reference: Curve | None = None,
+  reference_color: Rgba = (0.75, 0.55, 1.00, 0.9),
+) -> np.ndarray:
+  """A speed-against-position chart in the bottom-right corner of `frame`.
+
+  Sampled plans are coloured by cost as in the scene, the chosen plan and the
+  speed actually run are drawn on top. The landing box is shaded and the edge
+  of the run-up box marked.
+  """
+  image = Image.fromarray(frame).convert("RGBA")
+  panel = Image.new("RGBA", image.size, (0, 0, 0, 0))
+  draw = ImageDraw.Draw(panel)
+  w, h = 430, 210
+  x0, y0 = image.size[0] - w - 16, image.size[1] - h - 16
+  draw.rounded_rectangle((x0, y0, x0 + w, y0 + h), radius=10, fill=(12, 16, 24, 185))
+  font = _font("DejaVuSans.ttf", 15)
+  draw.text((x0 + 14, y0 + 10), "Speed along the course", font=font, fill=Hud.INK)
+  left, right, top, bottom = x0 + 46, x0 + w - 16, y0 + 38, y0 + h - 30
+
+  def px(x: np.ndarray | float, v: np.ndarray | float):
+    u = left + (right - left) * np.clip(np.asarray(x) / x_max, 0, 1)
+    z = bottom - (bottom - top) * np.clip(np.asarray(v) / v_max, 0, 1)
+    return u, z
+
+  bx0, _ = px(box[0], 0)
+  bx1, _ = px(box[1], 0)
+  draw.rectangle((float(bx0), top, float(bx1), bottom), fill=(237, 148, 51, 70))
+  ex, _ = px(edge, 0)
+  draw.line((float(ex), top, float(ex), bottom), fill=(*Hud.MUTED, 255), width=1)
+  draw.line((left, bottom, right, bottom), fill=(*Hud.MUTED, 255), width=1)
+  draw.line((left, top, left, bottom), fill=(*Hud.MUTED, 255), width=1)
+  small = _font("DejaVuSans.ttf", 12)
+  for v in (0, 1, 2, 3):
+    _, z = px(0, v)
+    draw.text((x0 + 14, float(z) - 7), f"{v}", font=small, fill=Hud.MUTED)
+  draw.text((right - 60, bottom + 6), f"{x_max:.0f} m", font=small, fill=Hud.MUTED)
+  draw.text((x0 + 14, top - 2), "m/s", font=small, fill=Hud.MUTED)
+
+  def line(curve: Curve, color: tuple[int, int, int, int], width: int) -> None:
+    u, z = px(*curve)
+    if len(u) > 1:
+      draw.line(list(zip(u.tolist(), z.tolist(), strict=True)), fill=color, width=width)
+
+  if costs is not None and len(samples):
+    colors = cost_colors(costs)
+    for i in np.argsort(costs)[::-1]:
+      r, g, b, a = colors[i]
+      line(samples[i], (*_to_255((r, g, b)), round(255 * a)), 1)
+  if reference is not None:
+    line(reference, (*_to_255(reference_color), 255), 2)
+  if chosen is not None:
+    line(chosen, (*_to_255(PLAN_COLOR), 255), 3)
+  line(actual, (*_to_255(TRAIL_COLOR), 255), 2)
+  return np.asarray(Image.alpha_composite(image, panel).convert("RGB"))
